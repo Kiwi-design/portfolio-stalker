@@ -64,7 +64,6 @@ function exitEditMode() {
   cancelEditBtn.style.display = "none";
   setTxStatus("");
 
-  // optional: clear qty/price only
   txQtyEl.value = "";
   txPriceEl.value = "";
 }
@@ -155,6 +154,15 @@ async function refreshTransactions() {
             data-quantity="${r.quantity}"
             data-price="${r.price}"
           >Edit</button>
+
+          <button class="deleteTx" style="margin-left:8px;"
+            data-id="${r.id}"
+            data-symbol="${r.symbol}"
+            data-txn_date="${r.txn_date}"
+            data-side="${r.side}"
+            data-quantity="${r.quantity}"
+            data-price="${r.price}"
+          >Delete</button>
         </td>
       </tr>
     `;
@@ -176,6 +184,46 @@ async function refreshTransactions() {
         price: Number(btn.dataset.price),
       };
       enterEditMode(tx);
+    });
+  });
+
+  // Attach delete handlers
+  txListEl.querySelectorAll(".deleteTx").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      const summary = `${btn.dataset.txn_date} ${btn.dataset.side} ${btn.dataset.symbol} qty=${btn.dataset.quantity} @ ${btn.dataset.price}`;
+
+      const ok = confirm(`Delete this transaction?\n\n${summary}`);
+      if (!ok) return;
+
+      setTxStatus("Deleting...");
+
+      try {
+        const session = await getSessionOrThrow();
+        const user_id = session.user.id;
+
+        const { error } = await supabaseClient
+          .from("transactions")
+          .delete()
+          .eq("id", id)
+          .eq("user_id", user_id);
+
+        if (error) {
+          setTxStatus("Delete error: " + error.message);
+          return;
+        }
+
+        // If we deleted the row we were editing, exit edit mode
+        if (editingTxId === id) {
+          exitEditMode();
+        }
+
+        setTxStatus("Deleted ✅");
+        await refreshTransactions();
+
+      } catch (e) {
+        setTxStatus("Error: " + e.message);
+      }
     });
   });
 }

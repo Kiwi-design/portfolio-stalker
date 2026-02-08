@@ -65,7 +65,6 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        # ---- 1) Read bearer token ----
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             self._send(401, {"status": "error", "message": "Missing Authorization: Bearer <token>"})
@@ -79,7 +78,7 @@ class handler(BaseHTTPRequestHandler):
             self._send(500, {"status": "error", "message": "Server misconfigured: missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY"})
             return
 
-        # ---- 2) Verify token with Supabase and get user_id ----
+        # Verify token and get user_id
         try:
             user = _fetch_json(
                 f"{supabase_url}/auth/v1/user",
@@ -99,7 +98,7 @@ class handler(BaseHTTPRequestHandler):
             self._send(401, {"status": "error", "message": f"Auth verification failed: {str(e)}"})
             return
 
-        # ---- 3) Fetch transactions for this user from Supabase ----
+        # Fetch user transactions
         try:
             tx_url = f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date"
             txs = _fetch_json(
@@ -115,7 +114,7 @@ class handler(BaseHTTPRequestHandler):
             self._send(502, {"status": "error", "message": f"Failed to load transactions: {str(e)}"})
             return
 
-        # ---- 4) Compute net quantities per symbol ----
+        # Net quantities
         positions = {}
         for t in txs:
             sym = str(t.get("symbol", "")).strip().upper()
@@ -133,10 +132,9 @@ class handler(BaseHTTPRequestHandler):
 
         symbols = [s for s, q in positions.items() if abs(q) > 1e-12]
 
-        # ---- 5) Fetch prices + convert value to EUR ----
+        # Prices + EUR conversion
         results = []
         errors = []
-
         fx_cache = {}
 
         def fx_to_eur(ccy: str):

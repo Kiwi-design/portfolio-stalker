@@ -4,6 +4,7 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const EMAIL_REDIRECT = "https://kiwi-design.github.io/portfolio-stalker/"; // keep your working redirect
 const API_BASE = "https://portfolio-stalker.vercel.app";
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 // --- Auth UI ---
 const emailEl = document.getElementById("email");
 const passwordEl = document.getElementById("password");
@@ -17,10 +18,12 @@ const menuEl = document.getElementById("menu");
 const appBox = document.getElementById("appBox");
 
 const tabPortfolio = document.getElementById("tabPortfolio");
+const tabPerformance = document.getElementById("tabPerformance");
 const tabTransactions = document.getElementById("tabTransactions");
 const tabAddEdit = document.getElementById("tabAddEdit");
 
 const sectionPortfolio = document.getElementById("sectionPortfolio");
+const sectionPerformance = document.getElementById("sectionPerformance");
 const sectionTransactions = document.getElementById("sectionTransactions");
 const sectionAddEdit = document.getElementById("sectionAddEdit");
 
@@ -28,6 +31,11 @@ const sectionAddEdit = document.getElementById("sectionAddEdit");
 const loadPortfolioBtn = document.getElementById("loadPortfolio");
 const portfolioStatusEl = document.getElementById("portfolioStatus");
 const portfolioOutputEl = document.getElementById("portfolioOutput");
+
+// Performance UI
+const refreshPerfBtn = document.getElementById("refreshPerf");
+const perfStatusEl = document.getElementById("perfStatus");
+const perfOutputEl = document.getElementById("perfOutput");
 
 // Transactions UI
 const refreshTxBtn = document.getElementById("refreshTx");
@@ -48,32 +56,40 @@ const cancelEditBtn = document.getElementById("cancelEdit");
 // --- Edit state ---
 let editingTxId = null;
 
+// Cache last portfolio payload so Performance tab can render without refetch if desired
+let lastPortfolioPayload = null;
+
 function setStatus(msg) { statusEl.textContent = msg; }
 function setTxStatus(msg) { txStatusEl.textContent = msg; }
 function setAddEditStatus(msg) { addEditStatusEl.textContent = msg; }
 function setPortfolioStatus(msg) { portfolioStatusEl.textContent = msg; }
+function setPerfStatus(msg) { perfStatusEl.textContent = msg; }
 
 function setActiveTab(which) {
-  // buttons
-  [tabPortfolio, tabTransactions, tabAddEdit].forEach(b => b.classList.remove("active"));
+  [tabPortfolio, tabPerformance, tabTransactions, tabAddEdit].forEach(b => b.classList.remove("active"));
   if (which === "portfolio") tabPortfolio.classList.add("active");
+  if (which === "performance") tabPerformance.classList.add("active");
   if (which === "transactions") tabTransactions.classList.add("active");
   if (which === "addedit") tabAddEdit.classList.add("active");
 
-  // sections
-  [sectionPortfolio, sectionTransactions, sectionAddEdit].forEach(s => s.classList.remove("active"));
+  [sectionPortfolio, sectionPerformance, sectionTransactions, sectionAddEdit].forEach(s => s.classList.remove("active"));
   if (which === "portfolio") sectionPortfolio.classList.add("active");
+  if (which === "performance") sectionPerformance.classList.add("active");
   if (which === "transactions") sectionTransactions.classList.add("active");
   if (which === "addedit") sectionAddEdit.classList.add("active");
 }
 
 tabPortfolio.addEventListener("click", () => setActiveTab("portfolio"));
+tabPerformance.addEventListener("click", () => {
+  setActiveTab("performance");
+  // if we already have data, render instantly; otherwise prompt refresh
+  if (lastPortfolioPayload?.performance) renderPerformance(lastPortfolioPayload);
+});
 tabTransactions.addEventListener("click", () => setActiveTab("transactions"));
 tabAddEdit.addEventListener("click", () => setActiveTab("addedit"));
 
 function enterEditMode(tx) {
   editingTxId = tx.id;
-
   txSymbolEl.value = tx.symbol;
   txDateEl.value = tx.txn_date;
   txSideEl.value = tx.side;
@@ -83,8 +99,6 @@ function enterEditMode(tx) {
   addTxBtn.textContent = "Save changes";
   cancelEditBtn.style.display = "inline-block";
   setAddEditStatus(`Editing transaction ${tx.id}`);
-
-  // Switch to Add/Edit tab automatically
   setActiveTab("addedit");
 }
 
@@ -93,7 +107,6 @@ function exitEditMode() {
   addTxBtn.textContent = "Add transaction";
   cancelEditBtn.style.display = "none";
   setAddEditStatus("");
-
   txQtyEl.value = "";
   txPriceEl.value = "";
 }
@@ -124,8 +137,13 @@ function setLoggedOutUI() {
   setTxStatus("");
   setAddEditStatus("");
   setPortfolioStatus("");
+  setPerfStatus("");
+
   txListEl.innerHTML = "";
   portfolioOutputEl.innerHTML = "";
+  perfOutputEl.innerHTML = "";
+  lastPortfolioPayload = null;
+
   exitEditMode();
 }
 
@@ -214,7 +232,6 @@ async function refreshTransactions() {
 
   txListEl.innerHTML = html;
 
-  // Edit
   txListEl.querySelectorAll(".editTx").forEach((btn) => {
     btn.addEventListener("click", () => {
       enterEditMode({
@@ -228,7 +245,6 @@ async function refreshTransactions() {
     });
   });
 
-  // Delete
   txListEl.querySelectorAll(".deleteTx").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.id;
@@ -256,7 +272,6 @@ async function refreshTransactions() {
 
         setTxStatus("Deleted ✅");
         await refreshTransactions();
-
       } catch (e) {
         setTxStatus("Error: " + e.message);
       }
@@ -266,7 +281,7 @@ async function refreshTransactions() {
 
 refreshTxBtn.addEventListener("click", refreshTransactions);
 
-/* ---------- Portfolio ---------- */
+/* ---------- Portfolio + Performance (from backend) ---------- */
 
 function renderPortfolioTable(results) {
   let total_eur = 0;
@@ -294,7 +309,6 @@ function renderPortfolioTable(results) {
     const value = r.value ?? 0;
     const value_eur = r.value_eur ?? 0;
     const ccy = r.currency ?? "";
-
     total_eur += value_eur;
 
     html += `
@@ -314,12 +328,8 @@ function renderPortfolioTable(results) {
         </tbody>
         <tfoot>
           <tr>
-            <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">
-              Total (EUR)
-            </td>
-            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">
-              ${total_eur.toFixed(2)}
-            </td>
+            <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">Total (EUR)</td>
+            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${total_eur.toFixed(2)}</td>
           </tr>
         </tfoot>
       </table>
@@ -329,10 +339,71 @@ function renderPortfolioTable(results) {
   return html;
 }
 
-loadPortfolioBtn.addEventListener("click", async () => {
-  setPortfolioStatus("Loading portfolio...");
-  portfolioOutputEl.innerHTML = "";
+function renderPerformance(payload) {
+  const perf = payload.performance || [];
+  const totals = payload.performance_totals || {};
+  if (!perf.length) {
+    perfOutputEl.innerHTML = "<p>No open positions to calculate performance.</p>";
+    return;
+  }
 
+  let html = `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Symbol</th>
+            <th class="num">Quantity</th>
+            <th class="num">Avg Cost</th>
+            <th class="num">Current</th>
+            <th>Currency</th>
+            <th class="num">Unrealized (U)</th>
+            <th class="num">Percentage</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  for (const r of perf) {
+    html += `
+      <tr>
+        <td>${r.name || ""}</td>
+        <td>${r.symbol}</td>
+        <td class="num">${Number(r.quantity).toFixed(4)}</td>
+        <td class="num">${Number(r.avg_cost ?? 0).toFixed(4)}</td>
+        <td class="num">${Number(r.current_price ?? 0).toFixed(4)}</td>
+        <td>${r.currency || ""}</td>
+        <td class="num">${Number(r.unrealized_eur ?? 0).toFixed(2)}</td>
+        <td class="num">${Number(r.percent_unrealized ?? 0).toFixed(2)}%</td>
+      </tr>
+    `;
+  }
+
+  html += `
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">Totals</td>
+            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_unrealized_eur ?? 0).toFixed(2)}</td>
+            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_percent ?? 0).toFixed(2)}%</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    <div class="muted" style="margin-top:8px;">
+      Total % is portfolio-weighted: total_unrealized_eur / total_cost_basis_eur.
+    </div>
+  `;
+
+  perfOutputEl.innerHTML = html;
+}
+
+async function loadPortfolioAndPerformance() {
+  setPortfolioStatus("Loading portfolio...");
+  setPerfStatus("Loading performance...");
+  portfolioOutputEl.innerHTML = "";
+  // keep perf table if already there, but will refresh
   try {
     const session = await getSessionOrThrow();
     const token = session.access_token;
@@ -342,18 +413,30 @@ loadPortfolioBtn.addEventListener("click", async () => {
     });
 
     const data = await res.json();
-
     if (!res.ok || data.status !== "ok") {
-      setPortfolioStatus("Backend error:\n" + JSON.stringify(data, null, 2));
+      const msg = "Backend error:\n" + JSON.stringify(data, null, 2);
+      setPortfolioStatus(msg);
+      setPerfStatus(msg);
       return;
     }
 
+    lastPortfolioPayload = data;
+
     setPortfolioStatus("Portfolio loaded ✅");
     portfolioOutputEl.innerHTML = renderPortfolioTable(data.results || []);
+
+    setPerfStatus("Performance loaded ✅");
+    renderPerformance(data);
+
   } catch (e) {
-    setPortfolioStatus("Fetch failed:\n" + e.message);
+    const msg = "Fetch failed:\n" + e.message;
+    setPortfolioStatus(msg);
+    setPerfStatus(msg);
   }
-});
+}
+
+loadPortfolioBtn.addEventListener("click", loadPortfolioAndPerformance);
+refreshPerfBtn.addEventListener("click", loadPortfolioAndPerformance);
 
 /* ---------- Add / Edit submit ---------- */
 
@@ -404,8 +487,8 @@ addTxBtn.addEventListener("click", async () => {
       txPriceEl.value = "";
     }
 
-    // If user is looking at Transactions, reflect changes
     await refreshTransactions();
+    // portfolio/performance will update when you click refresh
 
   } catch (e) {
     setAddEditStatus("Error: " + e.message);
@@ -417,12 +500,7 @@ addTxBtn.addEventListener("click", async () => {
 signupBtn.addEventListener("click", async () => {
   const email = emailEl.value.trim();
   const password = passwordEl.value;
-
-  if (!email || !password) {
-    setStatus("Please enter email + password.");
-    return;
-  }
-
+  if (!email || !password) { setStatus("Please enter email + password."); return; }
   setStatus("Signing up...");
 
   const { data, error } = await supabaseClient.auth.signUp({
@@ -431,10 +509,7 @@ signupBtn.addEventListener("click", async () => {
     options: { emailRedirectTo: EMAIL_REDIRECT }
   });
 
-  if (error) {
-    setStatus("Sign up error: " + error.message);
-    return;
-  }
+  if (error) { setStatus("Sign up error: " + error.message); return; }
 
   if (data.session?.user?.email) {
     setLoggedInUI(data.session.user.email);
@@ -447,20 +522,11 @@ signupBtn.addEventListener("click", async () => {
 loginBtn.addEventListener("click", async () => {
   const email = emailEl.value.trim();
   const password = passwordEl.value;
-
-  if (!email || !password) {
-    setStatus("Please enter email + password.");
-    return;
-  }
-
+  if (!email || !password) { setStatus("Please enter email + password."); return; }
   setStatus("Logging in...");
 
   const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
-
-  if (error) {
-    setStatus("Login error: " + error.message);
-    return;
-  }
+  if (error) { setStatus("Login error: " + error.message); return; }
 
   setLoggedInUI(data.user.email);
   await refreshTransactions();
@@ -468,23 +534,15 @@ loginBtn.addEventListener("click", async () => {
 
 logoutBtn.addEventListener("click", async () => {
   setStatus("Logging out...");
-
   const { error } = await supabaseClient.auth.signOut();
-  if (error) {
-    setStatus("Logout error: " + error.message);
-    return;
-  }
-
+  if (error) { setStatus("Logout error: " + error.message); return; }
   setLoggedOutUI();
 });
 
 /* ---------- Init ---------- */
 (async function init() {
   const { data, error } = await supabaseClient.auth.getSession();
-  if (error) {
-    setStatus("Session error: " + error.message);
-    return;
-  }
+  if (error) { setStatus("Session error: " + error.message); return; }
 
   const session = data.session;
   if (session?.user?.email) {

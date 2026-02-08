@@ -4,7 +4,6 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const EMAIL_REDIRECT = "https://kiwi-design.github.io/portfolio-stalker/"; // keep your working redirect
 const API_BASE = "https://portfolio-stalker.vercel.app";
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
 // --- Auth UI ---
 const emailEl = document.getElementById("email");
 const passwordEl = document.getElementById("password");
@@ -13,12 +12,30 @@ const signupBtn = document.getElementById("signup");
 const loginBtn = document.getElementById("login");
 const logoutBtn = document.getElementById("logout");
 
-// --- App UI ---
+// Menu + Sections
+const menuEl = document.getElementById("menu");
 const appBox = document.getElementById("appBox");
 
+const tabPortfolio = document.getElementById("tabPortfolio");
+const tabTransactions = document.getElementById("tabTransactions");
+const tabAddEdit = document.getElementById("tabAddEdit");
+
+const sectionPortfolio = document.getElementById("sectionPortfolio");
+const sectionTransactions = document.getElementById("sectionTransactions");
+const sectionAddEdit = document.getElementById("sectionAddEdit");
+
+// Portfolio UI
+const loadPortfolioBtn = document.getElementById("loadPortfolio");
+const portfolioStatusEl = document.getElementById("portfolioStatus");
+const portfolioOutputEl = document.getElementById("portfolioOutput");
+
 // Transactions UI
+const refreshTxBtn = document.getElementById("refreshTx");
 const txStatusEl = document.getElementById("txStatus");
 const txListEl = document.getElementById("txList");
+
+// Add/Edit UI
+const addEditStatusEl = document.getElementById("addEditStatus");
 
 const txSymbolEl = document.getElementById("txSymbol");
 const txDateEl = document.getElementById("txDate");
@@ -28,22 +45,34 @@ const txPriceEl = document.getElementById("txPrice");
 const addTxBtn = document.getElementById("addTx");
 const cancelEditBtn = document.getElementById("cancelEdit");
 
-// Portfolio UI
-const loadPortfolioBtn = document.getElementById("loadPortfolio");
-const portfolioStatusEl = document.getElementById("portfolioStatus");
-const portfolioOutputEl = document.getElementById("portfolioOutput");
-
-// --- Edit mode state ---
+// --- Edit state ---
 let editingTxId = null;
-let editingTxUserId = null;
 
 function setStatus(msg) { statusEl.textContent = msg; }
 function setTxStatus(msg) { txStatusEl.textContent = msg; }
+function setAddEditStatus(msg) { addEditStatusEl.textContent = msg; }
 function setPortfolioStatus(msg) { portfolioStatusEl.textContent = msg; }
+
+function setActiveTab(which) {
+  // buttons
+  [tabPortfolio, tabTransactions, tabAddEdit].forEach(b => b.classList.remove("active"));
+  if (which === "portfolio") tabPortfolio.classList.add("active");
+  if (which === "transactions") tabTransactions.classList.add("active");
+  if (which === "addedit") tabAddEdit.classList.add("active");
+
+  // sections
+  [sectionPortfolio, sectionTransactions, sectionAddEdit].forEach(s => s.classList.remove("active"));
+  if (which === "portfolio") sectionPortfolio.classList.add("active");
+  if (which === "transactions") sectionTransactions.classList.add("active");
+  if (which === "addedit") sectionAddEdit.classList.add("active");
+}
+
+tabPortfolio.addEventListener("click", () => setActiveTab("portfolio"));
+tabTransactions.addEventListener("click", () => setActiveTab("transactions"));
+tabAddEdit.addEventListener("click", () => setActiveTab("addedit"));
 
 function enterEditMode(tx) {
   editingTxId = tx.id;
-  editingTxUserId = tx.user_id;
 
   txSymbolEl.value = tx.symbol;
   txDateEl.value = tx.txn_date;
@@ -53,40 +82,47 @@ function enterEditMode(tx) {
 
   addTxBtn.textContent = "Save changes";
   cancelEditBtn.style.display = "inline-block";
-  setTxStatus(`Editing transaction ${tx.id}`);
+  setAddEditStatus(`Editing transaction ${tx.id}`);
+
+  // Switch to Add/Edit tab automatically
+  setActiveTab("addedit");
 }
 
 function exitEditMode() {
   editingTxId = null;
-  editingTxUserId = null;
-
   addTxBtn.textContent = "Add transaction";
   cancelEditBtn.style.display = "none";
-  setTxStatus("");
+  setAddEditStatus("");
 
   txQtyEl.value = "";
   txPriceEl.value = "";
 }
 
-cancelEditBtn.addEventListener("click", () => {
-  exitEditMode();
-});
+cancelEditBtn.addEventListener("click", () => exitEditMode());
 
 function setLoggedInUI(email) {
   signupBtn.style.display = "none";
   loginBtn.style.display = "none";
   logoutBtn.style.display = "inline-block";
+
+  menuEl.style.display = "flex";
   appBox.style.display = "block";
+
   setStatus(`Logged in as: ${email}`);
+  setActiveTab("portfolio");
 }
 
 function setLoggedOutUI() {
   signupBtn.style.display = "inline-block";
   loginBtn.style.display = "inline-block";
   logoutBtn.style.display = "none";
+
+  menuEl.style.display = "none";
   appBox.style.display = "none";
+
   setStatus("Not logged in.");
   setTxStatus("");
+  setAddEditStatus("");
   setPortfolioStatus("");
   txListEl.innerHTML = "";
   portfolioOutputEl.innerHTML = "";
@@ -99,6 +135,8 @@ async function getSessionOrThrow() {
   if (!data.session) throw new Error("Not logged in.");
   return data.session;
 }
+
+/* ---------- Transactions list ---------- */
 
 async function refreshTransactions() {
   setTxStatus("Loading transactions...");
@@ -122,18 +160,19 @@ async function refreshTransactions() {
   }
 
   let html = `
-    <table>
-      <thead>
-        <tr>
-          <th>Date</th>
-          <th>Symbol</th>
-          <th>Side</th>
-          <th class="num">Qty</th>
-          <th class="num">Price</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th class="num">Qty</th>
+            <th class="num">Price</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
   `;
 
   for (const r of data) {
@@ -147,7 +186,6 @@ async function refreshTransactions() {
         <td>
           <button class="editTx"
             data-id="${r.id}"
-            data-user_id="${r.user_id}"
             data-symbol="${r.symbol}"
             data-txn_date="${r.txn_date}"
             data-side="${r.side}"
@@ -155,7 +193,7 @@ async function refreshTransactions() {
             data-price="${r.price}"
           >Edit</button>
 
-          <button class="deleteTx" style="margin-left:8px;"
+          <button class="deleteTx danger" style="margin-left:8px;"
             data-id="${r.id}"
             data-symbol="${r.symbol}"
             data-txn_date="${r.txn_date}"
@@ -168,33 +206,34 @@ async function refreshTransactions() {
     `;
   }
 
-  html += `</tbody></table>`;
+  html += `
+        </tbody>
+      </table>
+    </div>
+  `;
+
   txListEl.innerHTML = html;
 
-  // Attach edit handlers
+  // Edit
   txListEl.querySelectorAll(".editTx").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const tx = {
+      enterEditMode({
         id: btn.dataset.id,
-        user_id: btn.dataset.user_id,
         symbol: btn.dataset.symbol,
         txn_date: btn.dataset.txn_date,
         side: btn.dataset.side,
         quantity: Number(btn.dataset.quantity),
         price: Number(btn.dataset.price),
-      };
-      enterEditMode(tx);
+      });
     });
   });
 
-  // Attach delete handlers
+  // Delete
   txListEl.querySelectorAll(".deleteTx").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.id;
       const summary = `${btn.dataset.txn_date} ${btn.dataset.side} ${btn.dataset.symbol} qty=${btn.dataset.quantity} @ ${btn.dataset.price}`;
-
-      const ok = confirm(`Delete this transaction?\n\n${summary}`);
-      if (!ok) return;
+      if (!confirm(`Delete this transaction?\n\n${summary}`)) return;
 
       setTxStatus("Deleting...");
 
@@ -213,10 +252,7 @@ async function refreshTransactions() {
           return;
         }
 
-        // If we deleted the row we were editing, exit edit mode
-        if (editingTxId === id) {
-          exitEditMode();
-        }
+        if (editingTxId === id) exitEditMode();
 
         setTxStatus("Deleted ✅");
         await refreshTransactions();
@@ -228,23 +264,28 @@ async function refreshTransactions() {
   });
 }
 
+refreshTxBtn.addEventListener("click", refreshTransactions);
+
+/* ---------- Portfolio ---------- */
+
 function renderPortfolioTable(results) {
   let total_eur = 0;
 
   let html = `
-    <table style="min-width: 820px;">
-      <thead>
-        <tr>
-          <th>Name</th>
-          <th>Symbol</th>
-          <th class="num">Price</th>
-          <th>Currency</th>
-          <th class="num">Quantity</th>
-          <th class="num">Value</th>
-          <th class="num">Value (EUR)</th>
-        </tr>
-      </thead>
-      <tbody>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Symbol</th>
+            <th class="num">Price</th>
+            <th>Currency</th>
+            <th class="num">Quantity</th>
+            <th class="num">Value</th>
+            <th class="num">Value (EUR)</th>
+          </tr>
+        </thead>
+        <tbody>
   `;
 
   for (const r of results) {
@@ -270,41 +311,109 @@ function renderPortfolioTable(results) {
   }
 
   html += `
-      </tbody>
-      <tfoot>
-        <tr>
-          <td colspan="6" style="text-align:right; font-weight:bold; border-top:2px solid #ccc; padding-top:10px;">
-            Total (EUR)
-          </td>
-          <td class="num" style="font-weight:bold; border-top:2px solid #ccc; padding-top:10px;">
-            ${total_eur.toFixed(2)}
-          </td>
-        </tr>
-      </tfoot>
-    </table>
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">
+              Total (EUR)
+            </td>
+            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">
+              ${total_eur.toFixed(2)}
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
   `;
 
   return html;
 }
 
-// ----- Init -----
-(async function init() {
-  const { data, error } = await supabaseClient.auth.getSession();
-  if (error) {
-    setStatus("Session error: " + error.message);
+loadPortfolioBtn.addEventListener("click", async () => {
+  setPortfolioStatus("Loading portfolio...");
+  portfolioOutputEl.innerHTML = "";
+
+  try {
+    const session = await getSessionOrThrow();
+    const token = session.access_token;
+
+    const res = await fetch(`${API_BASE}/api/portfolio`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || data.status !== "ok") {
+      setPortfolioStatus("Backend error:\n" + JSON.stringify(data, null, 2));
+      return;
+    }
+
+    setPortfolioStatus("Portfolio loaded ✅");
+    portfolioOutputEl.innerHTML = renderPortfolioTable(data.results || []);
+  } catch (e) {
+    setPortfolioStatus("Fetch failed:\n" + e.message);
+  }
+});
+
+/* ---------- Add / Edit submit ---------- */
+
+addTxBtn.addEventListener("click", async () => {
+  const symbol = txSymbolEl.value.trim().toUpperCase();
+  const txn_date = txDateEl.value;
+  const side = txSideEl.value;
+  const quantity = Number(txQtyEl.value);
+  const price = Number(txPriceEl.value);
+
+  if (!symbol || !txn_date || !side || !Number.isFinite(quantity) || !Number.isFinite(price) || quantity <= 0 || price <= 0) {
+    setAddEditStatus("Please fill symbol, date, side, quantity (>0), and price (>0).");
     return;
   }
 
-  const session = data.session;
-  if (session?.user?.email) {
-    setLoggedInUI(session.user.email);
-    await refreshTransactions();
-  } else {
-    setLoggedOutUI();
-  }
-})();
+  setAddEditStatus(editingTxId ? "Saving changes..." : "Saving transaction...");
 
-// ----- Auth handlers -----
+  try {
+    const session = await getSessionOrThrow();
+    const user_id = session.user.id;
+
+    let error;
+
+    if (!editingTxId) {
+      ({ error } = await supabaseClient.from("transactions").insert([{
+        user_id, symbol, txn_date, side, quantity, price
+      }]));
+    } else {
+      ({ error } = await supabaseClient
+        .from("transactions")
+        .update({ symbol, txn_date, side, quantity, price })
+        .eq("id", editingTxId)
+        .eq("user_id", user_id)
+      );
+    }
+
+    if (error) {
+      setAddEditStatus((editingTxId ? "Update error: " : "Insert error: ") + error.message);
+      return;
+    }
+
+    if (editingTxId) {
+      setAddEditStatus("Updated ✅");
+      exitEditMode();
+    } else {
+      setAddEditStatus("Saved ✅");
+      txQtyEl.value = "";
+      txPriceEl.value = "";
+    }
+
+    // If user is looking at Transactions, reflect changes
+    await refreshTransactions();
+
+  } catch (e) {
+    setAddEditStatus("Error: " + e.message);
+  }
+});
+
+/* ---------- Auth ---------- */
+
 signupBtn.addEventListener("click", async () => {
   const email = emailEl.value.trim();
   const password = passwordEl.value;
@@ -369,90 +478,19 @@ logoutBtn.addEventListener("click", async () => {
   setLoggedOutUI();
 });
 
-// ----- Add or Update transaction -----
-addTxBtn.addEventListener("click", async () => {
-  const symbol = txSymbolEl.value.trim().toUpperCase();
-  const txn_date = txDateEl.value;
-  const side = txSideEl.value;
-  const quantity = Number(txQtyEl.value);
-  const price = Number(txPriceEl.value);
-
-  if (!symbol || !txn_date || !side || !Number.isFinite(quantity) || !Number.isFinite(price) || quantity <= 0 || price <= 0) {
-    setTxStatus("Please fill symbol, date, side, quantity (>0), and price (>0).");
+/* ---------- Init ---------- */
+(async function init() {
+  const { data, error } = await supabaseClient.auth.getSession();
+  if (error) {
+    setStatus("Session error: " + error.message);
     return;
   }
 
-  setTxStatus(editingTxId ? "Saving changes..." : "Saving transaction...");
-
-  try {
-    const session = await getSessionOrThrow();
-    const user_id = session.user.id;
-
-    let error;
-
-    if (!editingTxId) {
-      ({ error } = await supabaseClient.from("transactions").insert([{
-        user_id,
-        symbol,
-        txn_date,
-        side,
-        quantity,
-        price
-      }]));
-    } else {
-      ({ error } = await supabaseClient
-        .from("transactions")
-        .update({ symbol, txn_date, side, quantity, price })
-        .eq("id", editingTxId)
-        .eq("user_id", user_id)
-      );
-    }
-
-    if (error) {
-      setTxStatus((editingTxId ? "Update error: " : "Insert error: ") + error.message);
-      return;
-    }
-
-    if (editingTxId) {
-      setTxStatus("Updated ✅");
-      exitEditMode();
-    } else {
-      setTxStatus("Saved ✅");
-      txQtyEl.value = "";
-      txPriceEl.value = "";
-    }
-
+  const session = data.session;
+  if (session?.user?.email) {
+    setLoggedInUI(session.user.email);
     await refreshTransactions();
-
-  } catch (e) {
-    setTxStatus("Error: " + e.message);
+  } else {
+    setLoggedOutUI();
   }
-});
-
-// ----- Load portfolio (calls Python backend on Vercel) -----
-loadPortfolioBtn.addEventListener("click", async () => {
-  setPortfolioStatus("Loading portfolio...");
-  portfolioOutputEl.innerHTML = "";
-
-  try {
-    const session = await getSessionOrThrow();
-    const token = session.access_token;
-
-    const res = await fetch(`${API_BASE}/api/portfolio`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-
-    const data = await res.json();
-
-    if (!res.ok || data.status !== "ok") {
-      setPortfolioStatus("Backend error:\n" + JSON.stringify(data, null, 2));
-      return;
-    }
-
-    setPortfolioStatus("Portfolio loaded ✅");
-    portfolioOutputEl.innerHTML = renderPortfolioTable(data.results || []);
-
-  } catch (e) {
-    setPortfolioStatus("Fetch failed:\n" + e.message);
-  }
-});
+})();

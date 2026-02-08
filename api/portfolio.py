@@ -2,7 +2,6 @@ from http.server import BaseHTTPRequestHandler
 import os
 import json
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -101,9 +100,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         # ---- 3) Fetch transactions for this user from Supabase ----
-        # Using service_role key to bypass RLS safely (we filter by user_id ourselves).
         try:
-            # URL-encoded PostgREST filter: user_id=eq.<uuid>
             tx_url = f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date"
             txs = _fetch_json(
                 tx_url,
@@ -119,7 +116,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         # ---- 4) Compute net quantities per symbol ----
-        positions = {}  # symbol -> qty
+        positions = {}
         for t in txs:
             sym = str(t.get("symbol", "")).strip().upper()
             side = str(t.get("side", "")).strip().upper()
@@ -134,14 +131,13 @@ class handler(BaseHTTPRequestHandler):
             else:
                 positions[sym] -= qty
 
-        # Remove symbols with zero position
         symbols = [s for s, q in positions.items() if abs(q) > 1e-12]
 
         # ---- 5) Fetch prices + convert value to EUR ----
         results = []
         errors = []
 
-        fx_cache = {}  # currency -> rate (EUR<ccy>=X)
+        fx_cache = {}
 
         def fx_to_eur(ccy: str):
             if ccy == "EUR":
@@ -168,7 +164,6 @@ class handler(BaseHTTPRequestHandler):
                 ccy = meta.get("currency")
                 exch = meta.get("exchangeName")
 
-                # Normalize GBp -> GBP
                 if ccy == "GBp":
                     price = (float(price) / 100) if price is not None else None
                     ccy = "GBP"
@@ -198,4 +193,3 @@ class handler(BaseHTTPRequestHandler):
             "results": results,
             "errors": errors,
         })
-

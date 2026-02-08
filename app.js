@@ -26,19 +26,52 @@ const txSideEl = document.getElementById("txSide");
 const txQtyEl = document.getElementById("txQty");
 const txPriceEl = document.getElementById("txPrice");
 const addTxBtn = document.getElementById("addTx");
-
 const cancelEditBtn = document.getElementById("cancelEdit");
-let editingTxId = null;        // which transaction row we’re editing
-let editingTxUserId = null;    // for safety (should match logged-in user)
 
 // Portfolio UI
 const loadPortfolioBtn = document.getElementById("loadPortfolio");
 const portfolioStatusEl = document.getElementById("portfolioStatus");
 const portfolioOutputEl = document.getElementById("portfolioOutput");
 
+// --- Edit mode state ---
+let editingTxId = null;
+let editingTxUserId = null;
+
 function setStatus(msg) { statusEl.textContent = msg; }
 function setTxStatus(msg) { txStatusEl.textContent = msg; }
 function setPortfolioStatus(msg) { portfolioStatusEl.textContent = msg; }
+
+function enterEditMode(tx) {
+  editingTxId = tx.id;
+  editingTxUserId = tx.user_id;
+
+  txSymbolEl.value = tx.symbol;
+  txDateEl.value = tx.txn_date;
+  txSideEl.value = tx.side;
+  txQtyEl.value = tx.quantity;
+  txPriceEl.value = tx.price;
+
+  addTxBtn.textContent = "Save changes";
+  cancelEditBtn.style.display = "inline-block";
+  setTxStatus(`Editing transaction ${tx.id}`);
+}
+
+function exitEditMode() {
+  editingTxId = null;
+  editingTxUserId = null;
+
+  addTxBtn.textContent = "Add transaction";
+  cancelEditBtn.style.display = "none";
+  setTxStatus("");
+
+  // optional: clear qty/price only
+  txQtyEl.value = "";
+  txPriceEl.value = "";
+}
+
+cancelEditBtn.addEventListener("click", () => {
+  exitEditMode();
+});
 
 function setLoggedInUI(email) {
   signupBtn.style.display = "none";
@@ -58,6 +91,7 @@ function setLoggedOutUI() {
   setPortfolioStatus("");
   txListEl.innerHTML = "";
   portfolioOutputEl.innerHTML = "";
+  exitEditMode();
 }
 
 async function getSessionOrThrow() {
@@ -72,7 +106,7 @@ async function refreshTransactions() {
 
   const { data, error } = await supabaseClient
     .from("transactions")
-    .select("id, symbol, txn_date, side, quantity, price, created_at")
+    .select("id, user_id, symbol, txn_date, side, quantity, price, created_at")
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
 
@@ -97,6 +131,7 @@ async function refreshTransactions() {
           <th>Side</th>
           <th class="num">Qty</th>
           <th class="num">Price</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -110,12 +145,39 @@ async function refreshTransactions() {
         <td>${r.side}</td>
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
         <td class="num">${Number(r.price).toFixed(4)}</td>
+        <td>
+          <button class="editTx"
+            data-id="${r.id}"
+            data-user_id="${r.user_id}"
+            data-symbol="${r.symbol}"
+            data-txn_date="${r.txn_date}"
+            data-side="${r.side}"
+            data-quantity="${r.quantity}"
+            data-price="${r.price}"
+          >Edit</button>
+        </td>
       </tr>
     `;
   }
 
   html += `</tbody></table>`;
   txListEl.innerHTML = html;
+
+  // Attach edit handlers
+  txListEl.querySelectorAll(".editTx").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tx = {
+        id: btn.dataset.id,
+        user_id: btn.dataset.user_id,
+        symbol: btn.dataset.symbol,
+        txn_date: btn.dataset.txn_date,
+        side: btn.dataset.side,
+        quantity: Number(btn.dataset.quantity),
+        price: Number(btn.dataset.price),
+      };
+      enterEditMode(tx);
+    });
+  });
 }
 
 function renderPortfolioTable(results) {
@@ -177,7 +239,7 @@ function renderPortfolioTable(results) {
   return html;
 }
 
-// ----- Init (restore session if already logged in) -----
+// ----- Init -----
 (async function init() {
   const { data, error } = await supabaseClient.auth.getSession();
   if (error) {
@@ -259,7 +321,7 @@ logoutBtn.addEventListener("click", async () => {
   setLoggedOutUI();
 });
 
-// ----- Add transaction -----
+// ----- Add or Update transaction -----
 addTxBtn.addEventListener("click", async () => {
   const symbol = txSymbolEl.value.trim().toUpperCase();
   const txn_date = txDateEl.value;
@@ -272,31 +334,48 @@ addTxBtn.addEventListener("click", async () => {
     return;
   }
 
-  setTxStatus("Saving transaction...");
+  setTxStatus(editingTxId ? "Saving changes..." : "Saving transaction...");
 
   try {
     const session = await getSessionOrThrow();
     const user_id = session.user.id;
 
-    const { error } = await supabaseClient.from("transactions").insert([{
-      user_id,
-      symbol,
-      txn_date,
-      side,
-      quantity,
-      price
-    }]);
+    let error;
+
+    if (!editingTxId) {
+      ({ error } = await supabaseClient.from("transactions").insert([{
+        user_id,
+        symbol,
+        txn_date,
+        side,
+        quantity,
+        price
+      }]));
+    } else {
+      ({ error } = await supabaseClient
+        .from("transactions")
+        .update({ symbol, txn_date, side, quantity, price })
+        .eq("id", editingTxId)
+        .eq("user_id", user_id)
+      );
+    }
 
     if (error) {
-      setTxStatus("Insert error: " + error.message);
+      setTxStatus((editingTxId ? "Update error: " : "Insert error: ") + error.message);
       return;
     }
 
-    setTxStatus("Saved ✅");
-    txQtyEl.value = "";
-    txPriceEl.value = "";
+    if (editingTxId) {
+      setTxStatus("Updated ✅");
+      exitEditMode();
+    } else {
+      setTxStatus("Saved ✅");
+      txQtyEl.value = "";
+      txPriceEl.value = "";
+    }
 
     await refreshTransactions();
+
   } catch (e) {
     setTxStatus("Error: " + e.message);
   }
@@ -323,9 +402,7 @@ loadPortfolioBtn.addEventListener("click", async () => {
     }
 
     setPortfolioStatus("Portfolio loaded ✅");
-
-    const results = data.results || [];
-    portfolioOutputEl.innerHTML = renderPortfolioTable(results);
+    portfolioOutputEl.innerHTML = renderPortfolioTable(data.results || []);
 
   } catch (e) {
     setPortfolioStatus("Fetch failed:\n" + e.message);

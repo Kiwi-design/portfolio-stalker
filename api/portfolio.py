@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler
 import os
 import json
 from urllib.request import Request, urlopen
+from datetime import datetime
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -47,6 +48,14 @@ def _get_meta_from_yahoo(symbol: str):
     return res0.get("meta", {})
 
 
+def _parse_date(d: str):
+    # Expect YYYY-MM-DD
+    try:
+        return datetime.strptime(d, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
 class handler(BaseHTTPRequestHandler):
     def _send(self, status: int, obj: dict):
         self.send_response(status)
@@ -78,7 +87,7 @@ class handler(BaseHTTPRequestHandler):
             self._send(500, {"status": "error", "message": "Server misconfigured: missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY"})
             return
 
-        # Verify token and get user_id
+        # 1) Verify token and get user_id
         try:
             user = _fetch_json(
                 f"{supabase_url}/auth/v1/user",
@@ -98,9 +107,10 @@ class handler(BaseHTTPRequestHandler):
             self._send(401, {"status": "error", "message": f"Auth verification failed: {str(e)}"})
             return
 
-        # Fetch user transactions
+        # 2) Fetch transactions for this user
         try:
-            tx_url = f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date"
+            # include txn_date + side + quantity + price + symbol
+            tx_url = f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date,created_at"
             txs = _fetch_json(
                 tx_url,
                 headers={
@@ -114,27 +124,59 @@ class handler(BaseHTTPRequestHandler):
             self._send(502, {"status": "error", "message": f"Failed to load transactions: {str(e)}"})
             return
 
-        # Net quantities
-        positions = {}
+        # Normalize and sort txs by date then created_at (stable)
+        norm_txs = []
         for t in txs:
             sym = str(t.get("symbol", "")).strip().upper()
             side = str(t.get("side", "")).strip().upper()
             qty = float(t.get("quantity") or 0)
-
-            if not sym or side not in ("BUY", "SELL"):
+            price = float(t.get("price") or 0)
+            d = _parse_date(str(t.get("txn_date") or ""))
+            created_at = str(t.get("created_at") or "")
+            if not sym or side not in ("BUY", "SELL") or qty <= 0 or price <= 0 or not d:
                 continue
+            norm_txs.append({
+                "symbol": sym,
+                "side": side,
+                "quantity": qty,
+                "price": price,
+                "txn_date": d,
+                "created_at": created_at,
+            })
 
-            positions.setdefault(sym, 0.0)
+        norm_txs.sort(key=lambda x: (x["txn_date"], x["created_at"], x["symbol"]))
+
+        # 3) Compute net quantities (for portfolio) and avg-cost open cost basis (for performance)
+        positions_qty = {}          # symbol -> qty
+        positions_cost_basis = {}   # symbol -> cost basis in native currency (avg cost method)
+
+        for t in norm_txs:
+            sym = t["symbol"]
+            side = t["side"]
+            q = t["quantity"]
+            p = t["price"]
+
+            positions_qty.setdefault(sym, 0.0)
+            positions_cost_basis.setdefault(sym, 0.0)
+
             if side == "BUY":
-                positions[sym] += qty
+                positions_qty[sym] += q
+                positions_cost_basis[sym] += q * p
             else:
-                positions[sym] -= qty
+                # SELL: reduce at current average cost
+                current_qty = positions_qty[sym]
+                if current_qty <= 1e-12:
+                    # selling without holdings; ignore for performance
+                    continue
+                avg_cost = positions_cost_basis[sym] / current_qty
+                sell_qty = min(q, current_qty)
+                positions_qty[sym] -= sell_qty
+                positions_cost_basis[sym] -= avg_cost * sell_qty
 
-        symbols = [s for s, q in positions.items() if abs(q) > 1e-12]
+        # Keep only open positions
+        symbols = [s for s, q in positions_qty.items() if abs(q) > 1e-12]
 
-        # Prices + EUR conversion
-        results = []
-        errors = []
+        # 4) Price + FX helpers
         fx_cache = {}
 
         def fx_to_eur(ccy: str):
@@ -152,8 +194,17 @@ class handler(BaseHTTPRequestHandler):
                 fx_cache[ccy] = None
                 return None
 
+        results = []
+        performance = []
+        errors = []
+
+        total_unrealized_eur = 0.0
+        total_cost_basis_eur = 0.0
+
         for sym in symbols:
-            qty = positions.get(sym, 0.0)
+            qty = positions_qty.get(sym, 0.0)
+            cost_basis = positions_cost_basis.get(sym, 0.0)
+
             try:
                 meta = _get_meta_from_yahoo(sym)
 
@@ -162,6 +213,7 @@ class handler(BaseHTTPRequestHandler):
                 ccy = meta.get("currency")
                 exch = meta.get("exchangeName")
 
+                # Normalize GBp -> GBP (divide price by 100)
                 if ccy == "GBp":
                     price = (float(price) / 100) if price is not None else None
                     ccy = "GBP"
@@ -172,6 +224,7 @@ class handler(BaseHTTPRequestHandler):
                 rate = fx_to_eur(ccy) if ccy else None
                 value_eur = (value * rate) if (value is not None and rate is not None) else None
 
+                # Portfolio row
                 results.append({
                     "symbol": sym,
                     "name": name,
@@ -182,12 +235,57 @@ class handler(BaseHTTPRequestHandler):
                     "value_eur": value_eur,
                     "exchange": exch,
                 })
+
+                # Performance row (avg cost for remaining position)
+                if qty > 1e-12 and price_f is not None:
+                    avg_cost = cost_basis / qty if cost_basis is not None else None
+                    unrealized_native = (price_f - avg_cost) * qty if avg_cost is not None else None
+                    cost_basis_eur = (cost_basis * rate) if (cost_basis is not None and rate is not None) else None
+                    unrealized_eur = (unrealized_native * rate) if (unrealized_native is not None and rate is not None) else None
+
+                    percent_unrealized = None
+                    if avg_cost and avg_cost > 1e-12:
+                        percent_unrealized = (price_f / avg_cost - 1.0) * 100.0
+
+                    if unrealized_eur is not None:
+                        total_unrealized_eur += unrealized_eur
+                    if cost_basis_eur is not None:
+                        total_cost_basis_eur += cost_basis_eur
+
+                    performance.append({
+                        "symbol": sym,
+                        "name": name,
+                        "currency": ccy,
+                        "quantity": qty,
+                        "avg_cost": avg_cost,
+                        "current_price": price_f,
+                        "unrealized_native": unrealized_native,
+                        "unrealized_eur": unrealized_eur,
+                        "percent_unrealized": percent_unrealized,
+                        "cost_basis_native": cost_basis,
+                        "cost_basis_eur": cost_basis_eur,
+                    })
+
             except Exception as e:
                 errors.append({"symbol": sym, "message": str(e)})
+
+        total_percent = None
+        if total_cost_basis_eur > 1e-12:
+            total_percent = (total_unrealized_eur / total_cost_basis_eur) * 100.0
+        else:
+            total_percent = 0.0
 
         self._send(200, {
             "status": "ok",
             "user": {"id": user_id, "email": email},
+
             "results": results,
             "errors": errors,
+
+            "performance": performance,
+            "performance_totals": {
+                "total_unrealized_eur": total_unrealized_eur,
+                "total_cost_basis_eur": total_cost_basis_eur,
+                "total_percent": total_percent,
+            }
         })

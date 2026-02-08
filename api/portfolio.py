@@ -49,7 +49,6 @@ def _get_meta_from_yahoo(symbol: str):
 
 
 def _parse_date(d: str):
-    # Expect YYYY-MM-DD
     try:
         return datetime.strptime(d, "%Y-%m-%d").date()
     except Exception:
@@ -107,9 +106,8 @@ class handler(BaseHTTPRequestHandler):
             self._send(401, {"status": "error", "message": f"Auth verification failed: {str(e)}"})
             return
 
-        # 2) Fetch transactions for this user
+        # 2) Fetch transactions
         try:
-            # include txn_date + side + quantity + price + symbol
             tx_url = f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date,created_at"
             txs = _fetch_json(
                 tx_url,
@@ -124,7 +122,7 @@ class handler(BaseHTTPRequestHandler):
             self._send(502, {"status": "error", "message": f"Failed to load transactions: {str(e)}"})
             return
 
-        # Normalize and sort txs by date then created_at (stable)
+        # Normalize + sort txs
         norm_txs = []
         for t in txs:
             sym = str(t.get("symbol", "")).strip().upper()
@@ -146,9 +144,9 @@ class handler(BaseHTTPRequestHandler):
 
         norm_txs.sort(key=lambda x: (x["txn_date"], x["created_at"], x["symbol"]))
 
-        # 3) Compute net quantities (for portfolio) and avg-cost open cost basis (for performance)
-        positions_qty = {}          # symbol -> qty
-        positions_cost_basis = {}   # symbol -> cost basis in native currency (avg cost method)
+        # 3) Avg-cost method for remaining position
+        positions_qty = {}
+        positions_cost_basis = {}
 
         for t in norm_txs:
             sym = t["symbol"]
@@ -163,32 +161,41 @@ class handler(BaseHTTPRequestHandler):
                 positions_qty[sym] += q
                 positions_cost_basis[sym] += q * p
             else:
-                # SELL: reduce at current average cost
                 current_qty = positions_qty[sym]
                 if current_qty <= 1e-12:
-                    # selling without holdings; ignore for performance
                     continue
                 avg_cost = positions_cost_basis[sym] / current_qty
                 sell_qty = min(q, current_qty)
                 positions_qty[sym] -= sell_qty
                 positions_cost_basis[sym] -= avg_cost * sell_qty
 
-        # Keep only open positions
         symbols = [s for s, q in positions_qty.items() if abs(q) > 1e-12]
 
-        # 4) Price + FX helpers
-        fx_cache = {}
+        # 4) FX: return CCY -> EUR conversion factor
+        # Yahoo "EURUSD=X" is USD per 1 EUR.
+        # To convert USD -> EUR, we must DIVIDE by that quote => multiply by 1/quote.
+        fx_cache = {}  # ccy -> ccy_to_eur
 
-        def fx_to_eur(ccy: str):
+        def ccy_to_eur_factor(ccy: str):
             if ccy == "EUR":
                 return 1.0
             if ccy in fx_cache:
                 return fx_cache[ccy]
-            fx_sym = f"EUR{ccy}=X"
+
+            fx_sym = f"EUR{ccy}=X"  # quote: CCY per 1 EUR
             try:
                 meta = _get_meta_from_yahoo(fx_sym)
-                rate = meta.get("regularMarketPrice")
-                fx_cache[ccy] = float(rate) if rate is not None else None
+                eur_to_ccy = meta.get("regularMarketPrice")
+                if eur_to_ccy is None:
+                    fx_cache[ccy] = None
+                    return None
+                eur_to_ccy = float(eur_to_ccy)
+                if eur_to_ccy <= 1e-12:
+                    fx_cache[ccy] = None
+                    return None
+
+                # invert: CCY -> EUR
+                fx_cache[ccy] = 1.0 / eur_to_ccy
                 return fx_cache[ccy]
             except Exception:
                 fx_cache[ccy] = None
@@ -221,8 +228,8 @@ class handler(BaseHTTPRequestHandler):
                 price_f = float(price) if price is not None else None
                 value = price_f * qty if price_f is not None else None
 
-                rate = fx_to_eur(ccy) if ccy else None
-                value_eur = (value * rate) if (value is not None and rate is not None) else None
+                factor = ccy_to_eur_factor(ccy) if ccy else None
+                value_eur = (value * factor) if (value is not None and factor is not None) else None
 
                 # Portfolio row
                 results.append({
@@ -236,12 +243,13 @@ class handler(BaseHTTPRequestHandler):
                     "exchange": exch,
                 })
 
-                # Performance row (avg cost for remaining position)
+                # Performance row
                 if qty > 1e-12 and price_f is not None:
-                    avg_cost = cost_basis / qty if cost_basis is not None else None
+                    avg_cost = cost_basis / qty if qty else None
                     unrealized_native = (price_f - avg_cost) * qty if avg_cost is not None else None
-                    cost_basis_eur = (cost_basis * rate) if (cost_basis is not None and rate is not None) else None
-                    unrealized_eur = (unrealized_native * rate) if (unrealized_native is not None and rate is not None) else None
+
+                    cost_basis_eur = (cost_basis * factor) if (factor is not None) else None
+                    unrealized_eur = (unrealized_native * factor) if (unrealized_native is not None and factor is not None) else None
 
                     percent_unrealized = None
                     if avg_cost and avg_cost > 1e-12:
@@ -269,11 +277,9 @@ class handler(BaseHTTPRequestHandler):
             except Exception as e:
                 errors.append({"symbol": sym, "message": str(e)})
 
-        total_percent = None
+        total_percent = 0.0
         if total_cost_basis_eur > 1e-12:
             total_percent = (total_unrealized_eur / total_cost_basis_eur) * 100.0
-        else:
-            total_percent = 0.0
 
         self._send(200, {
             "status": "ok",

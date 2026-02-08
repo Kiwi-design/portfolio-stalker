@@ -27,7 +27,6 @@
     }
 
     .row { margin-bottom: 10px; }
-
     label { font-size: 14px; color: #222; }
 
     input, select {
@@ -37,7 +36,7 @@
       box-sizing: border-box;
       border: 1px solid #ccc;
       border-radius: 8px;
-      font-size: 16px; /* important for iPhone: prevents zoom */
+      font-size: 16px; /* prevents iPhone zoom */
       background: #fff;
     }
 
@@ -63,15 +62,14 @@
     }
 
     .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
-
-    #status, #txStatus, #portfolioStatus {
+    #status, #txStatus, #portfolioStatus, #perfStatus, #addEditStatus {
       white-space: pre-wrap;
       margin-top: 10px;
       font-size: 14px;
       color: #333;
     }
 
-    /* Nav / menu */
+    /* Nav */
     .nav {
       display: flex;
       gap: 10px;
@@ -90,11 +88,10 @@
       border-color: #111;
     }
 
-    /* Sections */
     .section { display: none; }
     .section.active { display: block; }
 
-    /* Tables: make iPhone-friendly */
+    /* Tables: iPhone friendly */
     .table-wrap {
       width: 100%;
       overflow-x: auto;
@@ -105,7 +102,7 @@
 
     table {
       border-collapse: collapse;
-      min-width: 880px; /* keeps columns readable */
+      min-width: 920px;
       width: 100%;
     }
 
@@ -118,13 +115,8 @@
       font-size: 14px;
     }
 
-    th {
-      background: #f7f7f7;
-      font-weight: 600;
-    }
-
+    th { background: #f7f7f7; font-weight: 600; }
     td.num, th.num { text-align: right; }
-
     .muted { color: #666; font-size: 13px; }
 
     @media (max-width: 480px) {
@@ -165,15 +157,16 @@
     <!-- Menu (hidden until logged in) -->
     <div id="menu" class="nav" style="display:none; margin-top:12px;">
       <button id="tabPortfolio" class="active" type="button">Portfolio</button>
+      <button id="tabPerformance" type="button">Performance</button>
       <button id="tabTransactions" type="button">Transactions</button>
       <button id="tabAddEdit" type="button">Add / Edit</button>
     </div>
   </div>
 
-  <!-- App sections (hidden until logged in) -->
+  <!-- App sections -->
   <div id="appBox" style="display:none; max-width:980px;">
 
-    <!-- PORTFOLIO SECTION -->
+    <!-- PORTFOLIO -->
     <div id="sectionPortfolio" class="box section active">
       <div class="btn-row" style="align-items:center; justify-content:space-between;">
         <div>
@@ -187,7 +180,21 @@
       <div id="portfolioOutput" style="margin-top:10px;"></div>
     </div>
 
-    <!-- TRANSACTIONS LIST SECTION -->
+    <!-- PERFORMANCE -->
+    <div id="sectionPerformance" class="box section">
+      <div class="btn-row" style="align-items:center; justify-content:space-between;">
+        <div>
+          <h2 style="margin:0;">Performance</h2>
+          <div class="muted">Unrealized P&L uses average cost for remaining position</div>
+        </div>
+        <button id="refreshPerf" type="button">Refresh</button>
+      </div>
+
+      <div id="perfStatus"></div>
+      <div id="perfOutput" style="margin-top:10px;"></div>
+    </div>
+
+    <!-- TRANSACTIONS -->
     <div id="sectionTransactions" class="box section">
       <div style="display:flex; justify-content:space-between; align-items:flex-end; gap:10px; flex-wrap:wrap;">
         <div>
@@ -201,7 +208,7 @@
       <div id="txList" style="margin-top:10px;"></div>
     </div>
 
-    <!-- ADD/EDIT SECTION -->
+    <!-- ADD/EDIT -->
     <div id="sectionAddEdit" class="box section">
       <h2 style="margin-top:0;">Add / Edit transaction</h2>
 
@@ -238,13 +245,13 @@
         <button id="cancelEdit" style="display:none;" type="button">Cancel edit</button>
       </div>
 
-      <div id="addEditStatus" style="white-space:pre-wrap; margin-top:10px;"></div>
+      <div id="addEditStatus"></div>
       <div class="muted" style="margin-top:8px;">
         Tip: Edit from the Transactions tab. It will switch you here automatically.
       </div>
     </div>
   </div>
 
-  <script src="app.js?v=60"></script>
+  <script src="app.js?v=80"></script>
 </body>
 </html>

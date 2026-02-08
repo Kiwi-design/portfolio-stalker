@@ -1,6 +1,6 @@
 // 1) Paste your Supabase details here
-const SUPABASE_URL = "PASTE_YOUR_SUPABASE_PROJECT_URL_HERE";
-const SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_PUBLIC_KEY_HERE";
+const SUPABASE_URL = "https://dalchqdooacrxtonyoee.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRhbGNocWRvb2Fjcnh0b255b2VlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA1MzM0NTQsImV4cCI6MjA4NjEwOTQ1NH0.4zsqZ0uXNuouoAU7STUb7PGWvOvkweZX6f6RUI8lun4";
 
 // 2) Create client
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);

@@ -56,7 +56,7 @@ const cancelEditBtn = document.getElementById("cancelEdit");
 // --- Edit state ---
 let editingTxId = null;
 
-// Cache last portfolio payload so Performance tab can render without refetch if desired
+// Cache last backend payload
 let lastPortfolioPayload = null;
 
 function setStatus(msg) { statusEl.textContent = msg; }
@@ -82,7 +82,6 @@ function setActiveTab(which) {
 tabPortfolio.addEventListener("click", () => setActiveTab("portfolio"));
 tabPerformance.addEventListener("click", () => {
   setActiveTab("performance");
-  // if we already have data, render instantly; otherwise prompt refresh
   if (lastPortfolioPayload?.performance) renderPerformance(lastPortfolioPayload);
 });
 tabTransactions.addEventListener("click", () => setActiveTab("transactions"));
@@ -186,7 +185,7 @@ async function refreshTransactions() {
             <th>Symbol</th>
             <th>Side</th>
             <th class="num">Qty</th>
-            <th class="num">Price</th>
+            <th class="num">Price (EUR)</th>
             <th>Actions</th>
           </tr>
         </thead>
@@ -248,7 +247,7 @@ async function refreshTransactions() {
   txListEl.querySelectorAll(".deleteTx").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.id;
-      const summary = `${btn.dataset.txn_date} ${btn.dataset.side} ${btn.dataset.symbol} qty=${btn.dataset.quantity} @ ${btn.dataset.price}`;
+      const summary = `${btn.dataset.txn_date} ${btn.dataset.side} ${btn.dataset.symbol} qty=${btn.dataset.quantity} @ ${btn.dataset.price} EUR`;
       if (!confirm(`Delete this transaction?\n\n${summary}`)) return;
 
       setTxStatus("Deleting...");
@@ -281,7 +280,7 @@ async function refreshTransactions() {
 
 refreshTxBtn.addEventListener("click", refreshTransactions);
 
-/* ---------- Portfolio + Performance (from backend) ---------- */
+/* ---------- Portfolio + Performance ---------- */
 
 function renderPortfolioTable(results) {
   let total_eur = 0;
@@ -315,7 +314,7 @@ function renderPortfolioTable(results) {
       <tr>
         <td>${r.name || ""}</td>
         <td>${r.symbol}</td>
-        <td class="num">${Number(price).toFixed(2)}</td>
+        <td class="num">${Number(price).toFixed(4)}</td>
         <td>${ccy}</td>
         <td class="num">${Number(qty).toFixed(4)}</td>
         <td class="num">${Number(value).toFixed(2)}</td>
@@ -353,13 +352,13 @@ function renderPerformance(payload) {
         <thead>
           <tr>
             <th>Name</th>
-            <th>Symbol</th>
             <th class="num">Quantity</th>
-            <th class="num">Avg Cost</th>
-            <th class="num">Current</th>
+            <th class="num">Avg Cost (native)</th>
+            <th class="num">Current (native)</th>
             <th>Currency</th>
             <th class="num">Unrealized (EUR)</th>
             <th class="num">Percentage</th>
+            <th class="num">Realized (EUR)</th>
           </tr>
         </thead>
         <tbody>
@@ -369,13 +368,13 @@ function renderPerformance(payload) {
     html += `
       <tr>
         <td>${r.name || ""}</td>
-        <td>${r.symbol}</td>
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
         <td class="num">${Number(r.avg_cost ?? 0).toFixed(4)}</td>
         <td class="num">${Number(r.current_price ?? 0).toFixed(4)}</td>
         <td>${r.currency || ""}</td>
         <td class="num">${Number(r.unrealized_eur ?? 0).toFixed(2)}</td>
         <td class="num">${Number(r.percent_unrealized ?? 0).toFixed(2)}%</td>
+        <td class="num">${Number(r.realized_eur ?? 0).toFixed(2)}</td>
       </tr>
     `;
   }
@@ -384,9 +383,10 @@ function renderPerformance(payload) {
         </tbody>
         <tfoot>
           <tr>
-            <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">Totals</td>
+            <td colspan="5" class="num" style="font-weight:700; border-top:2px solid #ccc;">Totals</td>
             <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_unrealized_eur ?? 0).toFixed(2)}</td>
             <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_percent ?? 0).toFixed(2)}%</td>
+            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_realized_eur ?? 0).toFixed(2)}</td>
           </tr>
         </tfoot>
       </table>
@@ -403,7 +403,7 @@ async function loadPortfolioAndPerformance() {
   setPortfolioStatus("Loading portfolio...");
   setPerfStatus("Loading performance...");
   portfolioOutputEl.innerHTML = "";
-  // keep perf table if already there, but will refresh
+
   try {
     const session = await getSessionOrThrow();
     const token = session.access_token;
@@ -438,17 +438,17 @@ async function loadPortfolioAndPerformance() {
 loadPortfolioBtn.addEventListener("click", loadPortfolioAndPerformance);
 refreshPerfBtn.addEventListener("click", loadPortfolioAndPerformance);
 
-/* ---------- Add / Edit submit ---------- */
+/* ---------- Add / Edit ---------- */
 
 addTxBtn.addEventListener("click", async () => {
   const symbol = txSymbolEl.value.trim().toUpperCase();
   const txn_date = txDateEl.value;
   const side = txSideEl.value;
   const quantity = Number(txQtyEl.value);
-  const price = Number(txPriceEl.value);
+  const price = Number(txPriceEl.value); // EUR price
 
   if (!symbol || !txn_date || !side || !Number.isFinite(quantity) || !Number.isFinite(price) || quantity <= 0 || price <= 0) {
-    setAddEditStatus("Please fill symbol, date, side, quantity (>0), and price (>0).");
+    setAddEditStatus("Please fill symbol, date, side, quantity (>0), and price (>0). Price is in EUR.");
     return;
   }
 
@@ -488,8 +488,6 @@ addTxBtn.addEventListener("click", async () => {
     }
 
     await refreshTransactions();
-    // portfolio/performance will update when you click refresh
-
   } catch (e) {
     setAddEditStatus("Error: " + e.message);
   }

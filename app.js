@@ -358,7 +358,7 @@ function renderPerformance(payload) {
             <th class="num">Avg Cost</th>
             <th class="num">Current</th>
             <th>Currency</th>
-            <th class="num">Unrealized (U)</th>
+            <th class="num">Unrealized (EUR)</th>
             <th class="num">Percentage</th>
           </tr>
         </thead>

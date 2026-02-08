@@ -1,16 +1,42 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8" />
   <title>Portfolio Tracker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    input { padding: 8px; width: 280px; max-width: 90vw; }
+    button { padding: 8px 12px; margin-top: 8px; }
+    .row { margin-bottom: 10px; }
+    #status { white-space: pre-wrap; margin-top: 12px; }
+    .box { border: 1px solid #ddd; padding: 14px; border-radius: 8px; max-width: 420px; }
+  </style>
+
+  <!-- Supabase JS (browser build) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
+  <h1>Portfolio Tracker</h1>
 
-<h1>Portfolio Tracker</h1>
+  <div class="box">
+    <div class="row">
+      <label>Email</label><br/>
+      <input id="email" type="email" placeholder="you@example.com" />
+    </div>
 
-<button id="btn">Click me</button>
-<div id="output"></div>
+    <div class="row">
+      <label>Password</label><br/>
+      <input id="password" type="password" placeholder="Password" />
+    </div>
 
-<script src="app.js"></script>
+    <button id="signup">Sign up</button>
+    <button id="login">Log in</button>
+    <button id="logout" style="display:none;">Log out</button>
+
+    <div id="status"></div>
+  </div>
+
+  <script src="app.js?v=1"></script>
 </body>
 </html>

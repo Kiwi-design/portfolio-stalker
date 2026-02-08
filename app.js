@@ -27,6 +27,10 @@ const txQtyEl = document.getElementById("txQty");
 const txPriceEl = document.getElementById("txPrice");
 const addTxBtn = document.getElementById("addTx");
 
+const cancelEditBtn = document.getElementById("cancelEdit");
+let editingTxId = null;        // which transaction row we’re editing
+let editingTxUserId = null;    // for safety (should match logged-in user)
+
 // Portfolio UI
 const loadPortfolioBtn = document.getElementById("loadPortfolio");
 const portfolioStatusEl = document.getElementById("portfolioStatus");

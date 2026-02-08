@@ -5,18 +5,133 @@
   <title>Portfolio Tracker</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; }
-    input, select { padding: 8px; width: 280px; max-width: 90vw; }
-    button { padding: 8px 12px; margin-top: 8px; cursor: pointer; }
+    :root { --gap: 12px; }
+
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #fff;
+    }
+
+    h1 { margin: 0 0 12px 0; font-size: 22px; }
+
+    .box {
+      border: 1px solid #ddd;
+      padding: 14px;
+      border-radius: 10px;
+      background: #fff;
+      margin-bottom: 16px;
+      max-width: 980px;
+    }
+
     .row { margin-bottom: 10px; }
-    .box { border: 1px solid #ddd; padding: 14px; border-radius: 8px; max-width: 900px; margin-bottom: 16px; }
-    #status, #txStatus, #portfolioStatus { white-space: pre-wrap; margin-top: 10px; }
-    table { border-collapse: collapse; width: 100%; max-width: 900px; }
-    th, td { border-bottom: 1px solid #ddd; padding: 8px 10px; }
-    th { background: #f7f7f7; text-align: left; }
+
+    label { font-size: 14px; color: #222; }
+
+    input, select {
+      padding: 10px;
+      width: 100%;
+      max-width: 520px;
+      box-sizing: border-box;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      font-size: 16px; /* important for iPhone: prevents zoom */
+      background: #fff;
+    }
+
+    button {
+      padding: 10px 12px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      background: #f7f7f7;
+      cursor: pointer;
+      font-size: 16px;
+    }
+
+    button.primary {
+      background: #111;
+      color: #fff;
+      border-color: #111;
+    }
+
+    button.danger {
+      background: #fff;
+      border-color: #cc0000;
+      color: #cc0000;
+    }
+
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+    #status, #txStatus, #portfolioStatus {
+      white-space: pre-wrap;
+      margin-top: 10px;
+      font-size: 14px;
+      color: #333;
+    }
+
+    /* Nav / menu */
+    .nav {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 10px 0 0 0;
+    }
+
+    .nav button {
+      background: #fff;
+      border-color: #ddd;
+    }
+
+    .nav button.active {
+      background: #111;
+      color: #fff;
+      border-color: #111;
+    }
+
+    /* Sections */
+    .section { display: none; }
+    .section.active { display: block; }
+
+    /* Tables: make iPhone-friendly */
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      border: 1px solid #eee;
+      border-radius: 10px;
+    }
+
+    table {
+      border-collapse: collapse;
+      min-width: 880px; /* keeps columns readable */
+      width: 100%;
+    }
+
+    th, td {
+      border-bottom: 1px solid #eee;
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+      font-size: 14px;
+    }
+
+    th {
+      background: #f7f7f7;
+      font-weight: 600;
+    }
+
     td.num, th.num { text-align: right; }
+
+    .muted { color: #666; font-size: 13px; }
+
+    @media (max-width: 480px) {
+      body { padding: 12px; }
+      .box { padding: 12px; }
+      h1 { font-size: 20px; }
+    }
   </style>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -25,8 +140,9 @@
 <body>
   <h1>Portfolio Tracker</h1>
 
+  <!-- Auth box -->
   <div class="box">
-    <h2>Account</h2>
+    <h2 style="margin:0 0 10px 0;">Account</h2>
 
     <div class="row">
       <label>Email</label><br/>
@@ -38,62 +154,97 @@
       <input id="password" type="password" placeholder="Password" />
     </div>
 
-    <button id="signup">Sign up</button>
-    <button id="login">Log in</button>
-    <button id="logout" style="display:none;">Log out</button>
+    <div class="btn-row">
+      <button id="signup">Sign up</button>
+      <button id="login" class="primary">Log in</button>
+      <button id="logout" style="display:none;">Log out</button>
+    </div>
 
     <div id="status"></div>
+
+    <!-- Menu (hidden until logged in) -->
+    <div id="menu" class="nav" style="display:none; margin-top:12px;">
+      <button id="tabPortfolio" class="active" type="button">Portfolio</button>
+      <button id="tabTransactions" type="button">Transactions</button>
+      <button id="tabAddEdit" type="button">Add / Edit</button>
+    </div>
   </div>
 
-  <div class="box" id="appBox" style="display:none;">
-    <h2>Add / Edit transaction</h2>
+  <!-- App sections (hidden until logged in) -->
+  <div id="appBox" style="display:none; max-width:980px;">
 
-    <div class="row">
-      <label>Symbol</label><br/>
-      <input id="txSymbol" type="text" placeholder="AAPL or IWVL.L" />
+    <!-- PORTFOLIO SECTION -->
+    <div id="sectionPortfolio" class="box section active">
+      <div class="btn-row" style="align-items:center; justify-content:space-between;">
+        <div>
+          <h2 style="margin:0;">Portfolio</h2>
+          <div class="muted">Computed from your transactions</div>
+        </div>
+        <button id="loadPortfolio" class="primary" type="button">Load / Refresh</button>
+      </div>
+
+      <div id="portfolioStatus"></div>
+      <div id="portfolioOutput" style="margin-top:10px;"></div>
     </div>
 
-    <div class="row">
-      <label>Date</label><br/>
-      <input id="txDate" type="date" />
+    <!-- TRANSACTIONS LIST SECTION -->
+    <div id="sectionTransactions" class="box section">
+      <div style="display:flex; justify-content:space-between; align-items:flex-end; gap:10px; flex-wrap:wrap;">
+        <div>
+          <h2 style="margin:0;">Transactions</h2>
+          <div class="muted">Edit or delete from the list</div>
+        </div>
+        <button id="refreshTx" type="button">Refresh</button>
+      </div>
+
+      <div id="txStatus"></div>
+      <div id="txList" style="margin-top:10px;"></div>
     </div>
 
-    <div class="row">
-      <label>Side</label><br/>
-      <select id="txSide">
-        <option value="BUY">BUY</option>
-        <option value="SELL">SELL</option>
-      </select>
+    <!-- ADD/EDIT SECTION -->
+    <div id="sectionAddEdit" class="box section">
+      <h2 style="margin-top:0;">Add / Edit transaction</h2>
+
+      <div class="row">
+        <label>Symbol</label><br/>
+        <input id="txSymbol" type="text" placeholder="AAPL or IWVL.L" />
+      </div>
+
+      <div class="row">
+        <label>Date</label><br/>
+        <input id="txDate" type="date" />
+      </div>
+
+      <div class="row">
+        <label>Side</label><br/>
+        <select id="txSide">
+          <option value="BUY">BUY</option>
+          <option value="SELL">SELL</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label>Quantity</label><br/>
+        <input id="txQty" type="number" step="0.0001" placeholder="10" />
+      </div>
+
+      <div class="row">
+        <label>Price</label><br/>
+        <input id="txPrice" type="number" step="0.0001" placeholder="150.00" />
+      </div>
+
+      <div class="btn-row">
+        <button id="addTx" class="primary" type="button">Add transaction</button>
+        <button id="cancelEdit" style="display:none;" type="button">Cancel edit</button>
+      </div>
+
+      <div id="addEditStatus" style="white-space:pre-wrap; margin-top:10px;"></div>
+      <div class="muted" style="margin-top:8px;">
+        Tip: Edit from the Transactions tab. It will switch you here automatically.
+      </div>
     </div>
-
-    <div class="row">
-      <label>Quantity</label><br/>
-      <input id="txQty" type="number" step="0.0001" placeholder="10" />
-    </div>
-
-    <div class="row">
-      <label>Price</label><br/>
-      <input id="txPrice" type="number" step="0.0001" placeholder="150.00" />
-    </div>
-
-    <button id="addTx">Add transaction</button>
-    <button id="cancelEdit" style="display:none; margin-left:8px;">Cancel edit</button>
-
-    <div id="txStatus"></div>
-
-    <hr style="margin:18px 0;" />
-
-    <h2>Your portfolio</h2>
-    <button id="loadPortfolio">Load portfolio</button>
-    <div id="portfolioStatus"></div>
-    <div id="portfolioOutput" style="margin-top:10px;"></div>
-
-    <hr style="margin:18px 0;" />
-
-    <h2>Your transactions</h2>
-    <div id="txList"></div>
   </div>
 
-  <script src="app.js?v=40"></script>
+  <script src="app.js?v=60"></script>
 </body>
 </html>

@@ -60,7 +60,9 @@ signupBtn.addEventListener("click", async () => {
 
   setStatus("Signing up...");
 
-  const { data, error } = await supabaseClient.auth.signUp({ email, password });
+  const { data, error } = await supabaseClient.auth.signUp({ email, password, options: {
+    emailRedirectTo: "https://kiwi-design.github.io/portfolio-stalker/"
+  } });
 
   if (error) {
     setStatus("Sign up error: " + error.message);

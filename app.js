@@ -120,7 +120,9 @@ function setLoggedInUI(email) {
   menuEl.style.display = "flex";
   appBox.style.display = "block";
 
-  setStatus(`Logged in as: ${email}`);
+  setStatus(
+    `Logged in as: ${email}\nUse the tabs below to view your portfolio, check performance, and manage transactions.`
+  );
   setActiveTab("portfolio");
 }
 

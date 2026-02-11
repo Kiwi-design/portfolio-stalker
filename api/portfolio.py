@@ -1,7 +1,9 @@
 from http.server import BaseHTTPRequestHandler
 import os, json
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode, quote
 from datetime import datetime
+from datetime import timedelta, timezone
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -39,7 +41,27 @@ def yahoo_meta(symbol, date=None):
     if not res0:
         raise Exception(f"Yahoo missing result for {symbol}")
     return res0.get("meta") or {}
-
+    
+def yahoo_daily_closes(symbol, start_date, end_date):
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    end_ts = int((datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)).timestamp())
+    url = f"{YAHOO_BASES[0]}{quote(symbol)}?interval=1d&period1={start_ts}&period2={end_ts}"
+    data = fetch_json(url, {"User-Agent": UA, "Accept": "application/json"})
+    chart = data.get("chart", {})
+    if chart.get("error"):
+        raise Exception(str(chart["error"]))
+    res0 = (chart.get("result") or [None])[0] or {}
+    timestamps = res0.get("timestamp") or []
+    quote0 = ((res0.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = quote0.get("close") or []
+    meta = res0.get("meta") or {}
+    out = []
+    for ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+        d = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        out.append({"date": d, "close": float(close)})
+    return {"currency": meta.get("currency"), "rows": out}
 
 class handler(BaseHTTPRequestHandler):
     def _cors(self):
@@ -89,13 +111,36 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             # Load transactions (prices are in EUR per your rule)
+
+            supa_rest_headers = {
+                "apikey": service_key,
+                "Authorization": f"Bearer {service_key}",
+                "Accept": "application/json",
+            }
+
+            def supa_get(table, params):
+                qs = urlencode(params)
+                return fetch_json(f"{supabase_url}/rest/v1/{table}?{qs}", supa_rest_headers)
+
+            def supa_upsert(table, rows, on_conflict):
+                if not rows:
+                    return
+                req = Request(
+                    f"{supabase_url}/rest/v1/{table}?on_conflict={on_conflict}",
+                    data=json.dumps(rows).encode("utf-8"),
+                    headers={
+                        **supa_rest_headers,
+                        "Content-Type": "application/json",
+                        "Prefer": "resolution=merge-duplicates,return=minimal",
+                    },
+                    method="POST",
+                )
+                with urlopen(req, timeout=20):
+                    pass
+                    
             txs = fetch_json(
                 f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date,created_at",
-                {
-                    "apikey": service_key,
-                    "Authorization": f"Bearer {service_key}",
-                    "Accept": "application/json",
-                },
+                supa_rest_headers,
             )
 
             # Normalize and sort by txn_date then created_at
@@ -119,53 +164,245 @@ class handler(BaseHTTPRequestHandler):
                 })
             norm.sort(key=lambda x: (x["txn_date"], x["created_at"], x["symbol"]))
 
-            # FX caches
-            eur_to_ccy_cache = {}        # (ccy, date) -> EUR->CCY
-            ccy_to_eur_date_cache = {}   # (ccy, date) -> CCY->EUR
-            ccy_to_eur_today_cache = {}  # ccy -> CCY->EUR today
+            # Price/FX caches backed by Supabase
+            now_utc = datetime.now(timezone.utc)
+            today = now_utc.strftime("%Y-%m-%d")
+            one_year_ago = (now_utc - timedelta(days=365)).strftime("%Y-%m-%d")
 
+            price_cache = {}  # symbol -> {date -> row}
+            fx_cache = {}     # ccy -> {date -> row}
+
+            def normalize_price_and_ccy(raw_ccy, raw_price):
+                c = raw_ccy
+                p = float(raw_price)
+                if c == "GBp":
+                    return "GBP", p / 100.0
+                return c, p
+            
             def normalize_ccy(ccy: str):
                 # Treat GBp as GBP for FX and for arithmetic (pence->pounds handled for live prices)
                 return "GBP" if ccy == "GBp" else ccy
 
+                        def parse_iso_ts(value):
+                if not value:
+                    return None
+                try:
+                    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except Exception:
+                    return None
+
+            def contiguous_ranges(date_list):
+                if not date_list:
+                    return []
+                ordered = sorted(date_list)
+                ranges = []
+                start = ordered[0]
+                prev = ordered[0]
+                for d in ordered[1:]:
+                    prev_dt = datetime.strptime(prev, "%Y-%m-%d")
+                    d_dt = datetime.strptime(d, "%Y-%m-%d")
+                    if d_dt - prev_dt > timedelta(days=1):
+                        ranges.append((start, prev))
+                        start = d
+                    prev = d
+                ranges.append((start, prev))
+                return ranges
+
+            def save_prices(symbol, rows):
+                if not rows:
+                    return
+                supa_upsert("prices_daily", rows, "symbol,date")
+                entry = price_cache.setdefault(symbol, {})
+                for r in rows:
+                    entry[r["date"]] = r
+
+            def save_fx(ccy, rows):
+                if not rows:
+                    return
+                supa_upsert("fx_daily", rows, "ccy,date")
+                entry = fx_cache.setdefault(ccy, {})
+                for r in rows:
+                    entry[r["date"]] = r
+
+            def load_prices(symbol):
+                if symbol in price_cache:
+                    return price_cache[symbol]
+                rows = supa_get(
+                    "prices_daily",
+                    {
+                        "symbol": f"eq.{symbol}",
+                        "select": "symbol,date,close_native,currency,source,updated_at",
+                        "order": "date.asc",
+                    },
+                )
+                price_cache[symbol] = {r["date"]: r for r in rows}
+                return price_cache[symbol]
+
+            def load_fx(ccy):
+                if ccy in fx_cache:
+                    return fx_cache[ccy]
+                rows = supa_get(
+                    "fx_daily",
+                    {
+                        "ccy": f"eq.{ccy}",
+                        "select": "ccy,date,eur_to_ccy,updated_at",
+                        "order": "date.asc",
+                    },
+                )
+                fx_cache[ccy] = {r["date"]: r for r in rows}
+                return fx_cache[ccy]
+
+            def ensure_symbol_history(symbol, min_needed_date):
+                rows = load_prices(symbol)
+                if not rows:
+                    min_needed_date = min(min_needed_date, one_year_ago)
+
+                start = min_needed_date
+
+                # fetch only missing calendar dates + always refresh last 3 days
+                start_dt = datetime.strptime(start, "%Y-%m-%d")
+                end_dt = datetime.strptime(today, "%Y-%m-%d")
+                refresh_cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y-%m-%d")
+
+                wanted = []
+                d = start_dt
+                while d <= end_dt:
+                    ds = d.strftime("%Y-%m-%d")
+                    if (ds not in rows) or (ds >= refresh_cutoff):
+                        wanted.append(ds)
+                    d += timedelta(days=1)
+
+                for r_start, r_end in contiguous_ranges(wanted):
+                    payload = yahoo_daily_closes(symbol, r_start, r_end)
+                    raw_ccy = payload.get("currency")
+                    to_save = []
+                    for y in payload.get("rows") or []:
+                        ccy, close = normalize_price_and_ccy(raw_ccy, y["close"])
+                        if not ccy:
+                            continue
+                        to_save.append(
+                            {
+                                "symbol": symbol,
+                                "date": y["date"],
+                                "close_native": close,
+                                "currency": ccy,
+                                "source": "yahoo",
+                                "updated_at": now_utc.isoformat(),
+                            }
+                        )
+                    save_prices(symbol, to_save)
+
+            def ensure_fx_history(ccy, min_needed_date):
+                ccy = normalize_ccy(ccy)
+                if ccy == "EUR":
+                    return
+                rows = load_fx(ccy)
+                if not rows:
+                    min_needed_date = min(min_needed_date, one_year_ago)
+
+                start_dt = datetime.strptime(min_needed_date, "%Y-%m-%d")
+                end_dt = datetime.strptime(today, "%Y-%m-%d")
+                refresh_cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y-%m-%d")
+
+                wanted = []
+                d = start_dt
+                while d <= end_dt:
+                    ds = d.strftime("%Y-%m-%d")
+                    if (ds not in rows) or (ds >= refresh_cutoff):
+                        wanted.append(ds)
+                    d += timedelta(days=1)
+
+                pair = f"EUR{ccy}=X"
+                for r_start, r_end in contiguous_ranges(wanted):
+                    payload = yahoo_daily_closes(pair, r_start, r_end)
+                    to_save = []
+                    for y in payload.get("rows") or []:
+                        to_save.append(
+                            {
+                                "ccy": ccy,
+                                "date": y["date"],
+                                "eur_to_ccy": y["close"],
+                                "updated_at": now_utc.isoformat(),
+                            }
+                        )
+                    save_fx(ccy, to_save)
+
+            def latest_row_on_or_before(table, date):
+                keys = [k for k in table.keys() if k <= date]
+                if not keys:
+                    return None
+                return table[max(keys)]
+
             def eur_to_ccy_on_date(ccy: str, date: str):
-                # returns EUR -> CCY factor at date
                 ccy = normalize_ccy(ccy)
                 if ccy == "EUR":
                     return 1.0
-                key = (ccy, date)
-                if key in eur_to_ccy_cache:
-                    return eur_to_ccy_cache[key]
-                fx_meta = yahoo_meta(f"EUR{ccy}=X", date)
-                rate = fx_meta.get("regularMarketPrice")
-                eur_to_ccy_cache[key] = float(rate) if rate else None
-                return eur_to_ccy_cache[key]
+                ensure_fx_history(ccy, date)
+                row = latest_row_on_or_before(load_fx(ccy), date)
+                return float(row["eur_to_ccy"]) if row and row.get("eur_to_ccy") else None
 
             def ccy_to_eur_on_date(ccy: str, date: str):
-                # returns CCY -> EUR factor at date (inverse of EURCCY)
                 ccy = normalize_ccy(ccy)
                 if ccy == "EUR":
                     return 1.0
-                key = (ccy, date)
-                if key in ccy_to_eur_date_cache:
-                    return ccy_to_eur_date_cache[key]
                 eur_to_ccy = eur_to_ccy_on_date(ccy, date)
-                if eur_to_ccy is None or eur_to_ccy <= 1e-12:
-                    ccy_to_eur_date_cache[key] = None
-                else:
-                    ccy_to_eur_date_cache[key] = 1.0 / eur_to_ccy
-                return ccy_to_eur_date_cache[key]
+                return (1.0 / eur_to_ccy) if eur_to_ccy and eur_to_ccy > 1e-12 else None
 
             def ccy_to_eur_today(ccy: str):
                 ccy = normalize_ccy(ccy)
                 if ccy == "EUR":
                     return 1.0
-                if ccy in ccy_to_eur_today_cache:
-                    return ccy_to_eur_today_cache[ccy]
+                ensure_fx_history(ccy, today)
+                today_row = load_fx(ccy).get(today)
+                if today_row:
+                    updated = parse_iso_ts(today_row.get("updated_at"))
+                    if updated and (now_utc - updated) <= timedelta(minutes=30):
+                        rate = float(today_row.get("eur_to_ccy") or 0)
+                        return (1.0 / rate) if rate > 1e-12 else None
+                
                 fx_meta = yahoo_meta(f"EUR{ccy}=X")
                 rate = fx_meta.get("regularMarketPrice")
-                ccy_to_eur_today_cache[ccy] = (1.0 / float(rate)) if rate else None
-                return ccy_to_eur_today_cache[ccy]
+
+                if rate:
+                    save_fx(
+                        ccy,
+                        [{"ccy": ccy, "date": today, "eur_to_ccy": float(rate), "updated_at": now_utc.isoformat()}],
+                    )
+                    return 1.0 / float(rate)
+                return None
+
+            def symbol_currency_on_date(symbol: str, date: str):
+                ensure_symbol_history(symbol, date)
+                row = latest_row_on_or_before(load_prices(symbol), date)
+                return normalize_ccy(row.get("currency")) if row and row.get("currency") else None
+
+            def latest_symbol_price(symbol: str):
+                ensure_symbol_history(symbol, today)
+                today_row = load_prices(symbol).get(today)
+                if today_row:
+                    updated = parse_iso_ts(today_row.get("updated_at"))
+                    if updated and (now_utc - updated) <= timedelta(minutes=30):
+                        return normalize_ccy(today_row.get("currency")), float(today_row.get("close_native"))
+
+                meta_now = yahoo_meta(symbol)
+                price_now = meta_now.get("regularMarketPrice")
+                raw_ccy = meta_now.get("currency")
+                if price_now is None or not raw_ccy:
+                    return None, None
+
+                ccy, close = normalize_price_and_ccy(raw_ccy, price_now)
+                save_prices(
+                    symbol,
+                    [{
+                        "symbol": symbol,
+                        "date": today,
+                        "close_native": close,
+                        "currency": ccy,
+                        "source": "yahoo",
+                        "updated_at": now_utc.isoformat(),
+                    }],
+                )
+                return ccy, close
 
             # --- Average-cost tracking in NATIVE currency ---
             qty = {}            # symbol -> open qty
@@ -183,8 +420,7 @@ class handler(BaseHTTPRequestHandler):
                 d = t["txn_date"]
 
                 # Determine asset currency at that date
-                meta_trade = yahoo_meta(sym, d)
-                ccy = normalize_ccy(meta_trade.get("currency"))
+                ccy = symbol_currency_on_date(sym, d)
                 if not ccy:
                     raise Exception(f"Missing currency for {sym} on {d}")
                 asset_ccy[sym] = ccy
@@ -253,8 +489,7 @@ class handler(BaseHTTPRequestHandler):
                 price_eur = t["price_eur"]
                 d = t["txn_date"]
 
-                meta_trade = yahoo_meta(sym, d)
-                ccy = normalize_ccy(meta_trade.get("currency"))
+                ccy = symbol_currency_on_date(sym, d)
                 if not ccy:
                     continue
 
@@ -294,20 +529,10 @@ class handler(BaseHTTPRequestHandler):
                 try:
                     meta_now = yahoo_meta(sym)
                     name = meta_now.get("shortName") or meta_now.get("longName")
-                    ccy_now = normalize_ccy(meta_now.get("currency"))
-                    price_now = meta_now.get("regularMarketPrice")
-
-                    if price_now is None:
+                    ccy_now, price_now = latest_symbol_price(sym)
+                    if price_now is None or not ccy_now:
                         errors.append({"symbol": sym, "message": "Missing current price"})
                         continue
-
-                    price_now = float(price_now)
-
-                    # Handle GBp live pricing: Yahoo may report pence as GBp
-                    # If currency came as GBp we normalized to GBP; but price still needs /100.
-                    # We detect original currency:
-                    if meta_now.get("currency") == "GBp":
-                        price_now = price_now / 100.0
 
                     fx_ccy_to_eur_now = ccy_to_eur_today(ccy_now)
                     if fx_ccy_to_eur_now is None:

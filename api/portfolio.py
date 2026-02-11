@@ -41,7 +41,8 @@ def yahoo_meta(symbol, date=None):
     if not res0:
         raise Exception(f"Yahoo missing result for {symbol}")
     return res0.get("meta") or {}
-    
+
+
 def yahoo_daily_closes(symbol, start_date, end_date):
     start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
     end_ts = int((datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)).timestamp())
@@ -62,6 +63,7 @@ def yahoo_daily_closes(symbol, start_date, end_date):
         d = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
         out.append({"date": d, "close": float(close)})
     return {"currency": meta.get("currency"), "rows": out}
+
 
 class handler(BaseHTTPRequestHandler):
     def _cors(self):
@@ -111,7 +113,6 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             # Load transactions (prices are in EUR per your rule)
-
             supa_rest_headers = {
                 "apikey": service_key,
                 "Authorization": f"Bearer {service_key}",
@@ -119,11 +120,17 @@ class handler(BaseHTTPRequestHandler):
             }
 
             def supa_get(table, params):
+                if not table_cache_enabled.get(table, True):
+                    return []
                 qs = urlencode(params)
-                return fetch_json(f"{supabase_url}/rest/v1/{table}?{qs}", supa_rest_headers)
+                try:
+                    return fetch_json(f"{supabase_url}/rest/v1/{table}?{qs}", supa_rest_headers)
+                except Exception:
+                    table_cache_enabled[table] = False
+                    return []
 
             def supa_upsert(table, rows, on_conflict):
-                if not rows:
+                if not rows or not table_cache_enabled.get(table, True):
                     return
                 req = Request(
                     f"{supabase_url}/rest/v1/{table}?on_conflict={on_conflict}",
@@ -135,9 +142,12 @@ class handler(BaseHTTPRequestHandler):
                     },
                     method="POST",
                 )
-                with urlopen(req, timeout=20):
-                    pass
-                    
+                try:
+                    with urlopen(req, timeout=20):
+                        pass
+                except Exception:
+                    table_cache_enabled[table] = False
+
             txs = fetch_json(
                 f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date,created_at",
                 supa_rest_headers,
@@ -171,6 +181,9 @@ class handler(BaseHTTPRequestHandler):
 
             price_cache = {}  # symbol -> {date -> row}
             fx_cache = {}     # ccy -> {date -> row}
+            table_cache_enabled = {"prices_daily": True, "fx_daily": True}
+            ensured_symbol_min = {}
+            ensured_fx_min = {}
 
             def normalize_price_and_ccy(raw_ccy, raw_price):
                 c = raw_ccy
@@ -178,12 +191,12 @@ class handler(BaseHTTPRequestHandler):
                 if c == "GBp":
                     return "GBP", p / 100.0
                 return c, p
-            
+
             def normalize_ccy(ccy: str):
                 # Treat GBp as GBP for FX and for arithmetic (pence->pounds handled for live prices)
                 return "GBP" if ccy == "GBp" else ccy
 
-                        def parse_iso_ts(value):
+            def parse_iso_ts(value):
                 if not value:
                     return None
                 try:
@@ -253,6 +266,11 @@ class handler(BaseHTTPRequestHandler):
                 return fx_cache[ccy]
 
             def ensure_symbol_history(symbol, min_needed_date):
+                if not table_cache_enabled.get("prices_daily", True):
+                    return
+                prev = ensured_symbol_min.get(symbol)
+                if prev and prev <= min_needed_date:
+                    return
                 rows = load_prices(symbol)
                 if not rows:
                     min_needed_date = min(min_needed_date, one_year_ago)
@@ -291,10 +309,16 @@ class handler(BaseHTTPRequestHandler):
                             }
                         )
                     save_prices(symbol, to_save)
+                ensured_symbol_min[symbol] = min_needed_date
 
             def ensure_fx_history(ccy, min_needed_date):
+                if not table_cache_enabled.get("fx_daily", True):
+                    return
                 ccy = normalize_ccy(ccy)
                 if ccy == "EUR":
+                    return
+                prev = ensured_fx_min.get(ccy)
+                if prev and prev <= min_needed_date:
                     return
                 rows = load_fx(ccy)
                 if not rows:
@@ -326,6 +350,7 @@ class handler(BaseHTTPRequestHandler):
                             }
                         )
                     save_fx(ccy, to_save)
+                ensured_fx_min[ccy] = min_needed_date
 
             def latest_row_on_or_before(table, date):
                 keys = [k for k in table.keys() if k <= date]
@@ -339,7 +364,14 @@ class handler(BaseHTTPRequestHandler):
                     return 1.0
                 ensure_fx_history(ccy, date)
                 row = latest_row_on_or_before(load_fx(ccy), date)
-                return float(row["eur_to_ccy"]) if row and row.get("eur_to_ccy") else None
+                if row and row.get("eur_to_ccy"):
+                    return float(row["eur_to_ccy"])
+                try:
+                    fx_meta = yahoo_meta(f"EUR{ccy}=X", date)
+                    rate = fx_meta.get("regularMarketPrice")
+                    return float(rate) if rate else None
+                except Exception:
+                    return None
 
             def ccy_to_eur_on_date(ccy: str, date: str):
                 ccy = normalize_ccy(ccy)
@@ -359,10 +391,12 @@ class handler(BaseHTTPRequestHandler):
                     if updated and (now_utc - updated) <= timedelta(minutes=30):
                         rate = float(today_row.get("eur_to_ccy") or 0)
                         return (1.0 / rate) if rate > 1e-12 else None
-                
-                fx_meta = yahoo_meta(f"EUR{ccy}=X")
-                rate = fx_meta.get("regularMarketPrice")
 
+                try:
+                    fx_meta = yahoo_meta(f"EUR{ccy}=X")
+                    rate = fx_meta.get("regularMarketPrice")
+                except Exception:
+                    rate = None
                 if rate:
                     save_fx(
                         ccy,
@@ -374,7 +408,13 @@ class handler(BaseHTTPRequestHandler):
             def symbol_currency_on_date(symbol: str, date: str):
                 ensure_symbol_history(symbol, date)
                 row = latest_row_on_or_before(load_prices(symbol), date)
-                return normalize_ccy(row.get("currency")) if row and row.get("currency") else None
+                if row and row.get("currency"):
+                    return normalize_ccy(row.get("currency"))
+                try:
+                    meta_trade = yahoo_meta(symbol, date)
+                    return normalize_ccy(meta_trade.get("currency"))
+                except Exception:
+                    return None
 
             def latest_symbol_price(symbol: str):
                 ensure_symbol_history(symbol, today)
@@ -384,9 +424,12 @@ class handler(BaseHTTPRequestHandler):
                     if updated and (now_utc - updated) <= timedelta(minutes=30):
                         return normalize_ccy(today_row.get("currency")), float(today_row.get("close_native"))
 
-                meta_now = yahoo_meta(symbol)
-                price_now = meta_now.get("regularMarketPrice")
-                raw_ccy = meta_now.get("currency")
+                try:
+                    meta_now = yahoo_meta(symbol)
+                    price_now = meta_now.get("regularMarketPrice")
+                    raw_ccy = meta_now.get("currency")
+                except Exception:
+                    return None, None
                 if price_now is None or not raw_ccy:
                     return None, None
 
@@ -527,9 +570,9 @@ class handler(BaseHTTPRequestHandler):
                     continue
 
                 try:
+                    ccy_now, price_now = latest_symbol_price(sym)
                     meta_now = yahoo_meta(sym)
                     name = meta_now.get("shortName") or meta_now.get("longName")
-                    ccy_now, price_now = latest_symbol_price(sym)
                     if price_now is None or not ccy_now:
                         errors.append({"symbol": sym, "message": "Missing current price"})
                         continue

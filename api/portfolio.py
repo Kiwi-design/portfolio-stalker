@@ -500,6 +500,9 @@ class handler(BaseHTTPRequestHandler):
             qty2 = {}
             cost2 = {}
             realized_eur = {}  # symbol -> realized in EUR
+            sold_qty_native = {}
+            sold_value_native = {}
+            sold_cost_native = {}
 
             for t in norm:
                 sym = t["symbol"]
@@ -522,6 +525,9 @@ class handler(BaseHTTPRequestHandler):
                 qty2.setdefault(sym, 0.0)
                 cost2.setdefault(sym, 0.0)
                 realized_eur.setdefault(sym, 0.0)
+                sold_qty_native.setdefault(sym, 0.0)
+                sold_value_native.setdefault(sym, 0.0)
+                sold_cost_native.setdefault(sym, 0.0)
 
                 if side == "BUY":
                     qty2[sym] += q
@@ -535,6 +541,9 @@ class handler(BaseHTTPRequestHandler):
                     realized_native_tx = (trade_price_native - avg_cost) * sell_q
                     realized_eur_tx = realized_native_tx * fx_ccy_to_eur  # convert at SELL date
                     realized_eur[sym] += realized_eur_tx
+                    sold_qty_native[sym] += sell_q
+                    sold_value_native[sym] += trade_price_native * sell_q
+                    sold_cost_native[sym] += avg_cost * sell_q
 
                     qty2[sym] -= sell_q
                     cost2[sym] -= avg_cost * sell_q
@@ -543,16 +552,29 @@ class handler(BaseHTTPRequestHandler):
             closed_symbols = [sym for sym, q_open in qty.items() if q_open <= 1e-12]
             for sym in closed_symbols:
                 total_realized_eur += realized_eur.get(sym, 0.0)
+                sold_qty = sold_qty_native.get(sym, 0.0)
+                sold_value = sold_value_native.get(sym, 0.0)
+                sold_cost = sold_cost_native.get(sym, 0.0)
+                avg_cost_sold = (sold_cost / sold_qty) if sold_qty > 1e-12 else 0.0
+                avg_sold = (sold_value / sold_qty) if sold_qty > 1e-12 else 0.0
+                percent_realized = ((avg_sold / avg_cost_sold - 1.0) * 100.0) if avg_cost_sold > 1e-12 else 0.0
+                try:
+                    meta_closed = yahoo_meta(sym)
+                    closed_name = meta_closed.get("shortName") or meta_closed.get("longName") or sym
+                except Exception:
+                    closed_name = sym
                 performance.append({
                     "symbol": sym,
-                    "name": sym,
+                    "name": closed_name,
                     "quantity": 0.0,
-                    "avg_cost": 0.0,
+                    "avg_cost": avg_cost_sold,
+                    "avg_sold": avg_sold,
                     "current_price": 0.0,
                     "currency": asset_ccy.get(sym) or "",
                     "unrealized_eur": 0.0,
                     "percent_unrealized": 0.0,
                     "realized_eur": realized_eur.get(sym, 0.0),
+                    "percent_realized": percent_realized,
                 })
 
             # Now build open positions
@@ -595,16 +617,25 @@ class handler(BaseHTTPRequestHandler):
                         "value_eur": value_eur,
                     })
 
+                    sold_qty = sold_qty_native.get(sym, 0.0)
+                    sold_value = sold_value_native.get(sym, 0.0)
+                    sold_cost = sold_cost_native.get(sym, 0.0)
+                    avg_sold = (sold_value / sold_qty) if sold_qty > 1e-12 else 0.0
+                    avg_cost_sold = (sold_cost / sold_qty) if sold_qty > 1e-12 else 0.0
+                    percent_realized = ((avg_sold / avg_cost_sold - 1.0) * 100.0) if avg_cost_sold > 1e-12 else 0.0
+
                     performance.append({
                         "symbol": sym,
                         "name": name,
                         "quantity": q_open,
                         "avg_cost": avg_cost_native,
+                        "avg_sold": avg_sold,
                         "current_price": price_now,
                         "currency": ccy_now,
                         "unrealized_eur": unreal_eur,
                         "percent_unrealized": (price_now / avg_cost_native - 1.0) * 100.0 if avg_cost_native > 1e-12 else 0.0,
                         "realized_eur": realized_eur.get(sym, 0.0),
+                        "percent_realized": percent_realized,
                     })
 
                 except Exception as e:

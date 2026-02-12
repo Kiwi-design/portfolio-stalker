@@ -344,7 +344,7 @@ function renderPerformance(payload) {
   const perf = payload.performance || [];
   const totals = payload.performance_totals || {};
   if (!perf.length) {
-    perfOutputEl.innerHTML = "<p>No open positions to calculate performance.</p>";
+    perfOutputEl.innerHTML = "<p>No positions to calculate performance.</p>";
     return;
   }
 
@@ -367,8 +367,9 @@ function renderPerformance(payload) {
   `;
 
   for (const r of perf) {
+    const isClosed = Math.abs(Number(r.quantity ?? 0)) <= 1e-12;
     html += `
-      <tr>
+      <tr${isClosed ? ' style="background:#ffecec;"' : ''}>
         <td>${r.name || ""}</td>
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
         <td class="num">${Number(r.avg_cost ?? 0).toFixed(4)}</td>

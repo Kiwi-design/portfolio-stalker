@@ -2,8 +2,7 @@ from http.server import BaseHTTPRequestHandler
 import os, json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode, quote
-from datetime import datetime
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -450,8 +449,6 @@ class handler(BaseHTTPRequestHandler):
             # --- Average-cost tracking in NATIVE currency ---
             qty = {}            # symbol -> open qty
             cost_native = {}    # symbol -> open cost basis (native)
-            realized_native = {}  # symbol -> realized profit (native), accumulated over SELLs
-
             # Cache asset trading currency (from Yahoo at transaction time)
             asset_ccy = {}  # symbol -> currency
 
@@ -476,8 +473,6 @@ class handler(BaseHTTPRequestHandler):
 
                 qty.setdefault(sym, 0.0)
                 cost_native.setdefault(sym, 0.0)
-                realized_native.setdefault(sym, 0.0)
-
                 if side == "BUY":
                     qty[sym] += q
                     cost_native[sym] += q * trade_price_native
@@ -488,8 +483,6 @@ class handler(BaseHTTPRequestHandler):
                         continue
                     avg_cost = cost_native[sym] / qty[sym]
                     sell_q = min(q, qty[sym])
-
-                    realized_native[sym] += (trade_price_native - avg_cost) * sell_q
 
                     qty[sym] -= sell_q
                     cost_native[sym] -= avg_cost * sell_q
@@ -502,23 +495,6 @@ class handler(BaseHTTPRequestHandler):
             total_unrealized_eur = 0.0
             total_cost_basis_eur = 0.0
             total_realized_eur = 0.0
-
-            for sym, q_open in qty.items():
-                ccy = asset_ccy.get(sym)
-                if not ccy:
-                    # if no tx currency known, skip
-                    continue
-
-                # Realized(EUR): convert realized_native to EUR using a consistent approach
-                # We convert each SELL at its date in the loop above by keeping realized in native,
-                # but EUR needs an FX point. We will convert SELL-by-SELL at date would be ideal.
-                #
-                # To keep it correct, we should convert realized per SELL at the SELL date.
-                # We did not store per-sell breakdown, so we will recompute realized EUR accurately
-                # by replaying transactions again just for realized EUR (lightweight, uses cache).
-                #
-                # (This avoids incorrect conversion using today's FX.)
-                pass
 
             # Recompute realized EUR accurately (SELL-by-SELL conversion at sale date)
             qty2 = {}

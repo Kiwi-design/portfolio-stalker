@@ -539,10 +539,26 @@ class handler(BaseHTTPRequestHandler):
                     qty2[sym] -= sell_q
                     cost2[sym] -= avg_cost * sell_q
 
+            # Build rows for fully closed positions (quantity == 0) in Performance tab
+            closed_symbols = [sym for sym, q_open in qty.items() if q_open <= 1e-12]
+            for sym in closed_symbols:
+                total_realized_eur += realized_eur.get(sym, 0.0)
+                performance.append({
+                    "symbol": sym,
+                    "name": sym,
+                    "quantity": 0.0,
+                    "avg_cost": 0.0,
+                    "current_price": 0.0,
+                    "currency": asset_ccy.get(sym) or "",
+                    "unrealized_eur": 0.0,
+                    "percent_unrealized": 0.0,
+                    "realized_eur": realized_eur.get(sym, 0.0),
+                })
+
             # Now build open positions
             for sym, q_open in qty.items():
                 if q_open <= 1e-12:
-                    # no open position, but still could have realized P&L
+                    # closed symbols are shown in Performance tab
                     continue
 
                 try:

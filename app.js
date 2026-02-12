@@ -356,11 +356,13 @@ function renderPerformance(payload) {
             <th>Name</th>
             <th class="num">Quantity</th>
             <th class="num">Avg Cost (native)</th>
+            <th class="num">Avg Sold (native)</th>
             <th class="num">Current (native)</th>
             <th>Currency</th>
             <th class="num">Unrealized (EUR)</th>
             <th class="num">Percentage</th>
             <th class="num">Realized (EUR)</th>
+            <th class="num">Percentage</th>
           </tr>
         </thead>
         <tbody>
@@ -373,11 +375,13 @@ function renderPerformance(payload) {
         <td>${r.name || ""}</td>
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
         <td class="num">${Number(r.avg_cost ?? 0).toFixed(4)}</td>
+        <td class="num">${Number(r.avg_sold ?? 0).toFixed(4)}</td>
         <td class="num">${Number(r.current_price ?? 0).toFixed(4)}</td>
         <td>${r.currency || ""}</td>
         <td class="num">${Number(r.unrealized_eur ?? 0).toFixed(2)}</td>
         <td class="num">${Number(r.percent_unrealized ?? 0).toFixed(2)}%</td>
         <td class="num">${Number(r.realized_eur ?? 0).toFixed(2)}</td>
+        <td class="num">${Number(r.percent_realized ?? 0).toFixed(2)}%</td>
       </tr>
     `;
   }
@@ -386,10 +390,11 @@ function renderPerformance(payload) {
         </tbody>
         <tfoot>
           <tr>
-            <td colspan="5" class="num" style="font-weight:700; border-top:2px solid #ccc;">Totals</td>
+            <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">Totals</td>
             <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_unrealized_eur ?? 0).toFixed(2)}</td>
             <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_percent ?? 0).toFixed(2)}%</td>
             <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_realized_eur ?? 0).toFixed(2)}</td>
+            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">-</td>
           </tr>
         </tfoot>
       </table>

@@ -12,6 +12,11 @@ const statusEl = document.getElementById("status");
 const signupBtn = document.getElementById("signup");
 const loginBtn = document.getElementById("login");
 const logoutBtn = document.getElementById("logout");
+const postLoginPanel = document.getElementById("postLoginPanel");
+const inceptionPanel = document.getElementById("inceptionPanel");
+const topPerfMetricsEl = document.getElementById("topPerfMetrics");
+const inceptionChartEl = document.getElementById("inceptionChart");
+const inceptionChartCaptionEl = document.getElementById("inceptionChartCaption");
 
 // Menu + Sections
 const menuEl = document.getElementById("menu");
@@ -21,11 +26,13 @@ const tabPortfolio = document.getElementById("tabPortfolio");
 const tabPerformance = document.getElementById("tabPerformance");
 const tabTransactions = document.getElementById("tabTransactions");
 const tabAddEdit = document.getElementById("tabAddEdit");
+const tabStatistics = document.getElementById("tabStatistics");
 
 const sectionPortfolio = document.getElementById("sectionPortfolio");
 const sectionPerformance = document.getElementById("sectionPerformance");
 const sectionTransactions = document.getElementById("sectionTransactions");
 const sectionAddEdit = document.getElementById("sectionAddEdit");
+const sectionStatistics = document.getElementById("sectionStatistics");
 
 // Portfolio UI
 const loadPortfolioBtn = document.getElementById("loadPortfolio");
@@ -36,6 +43,11 @@ const portfolioOutputEl = document.getElementById("portfolioOutput");
 const refreshPerfBtn = document.getElementById("refreshPerf");
 const perfStatusEl = document.getElementById("perfStatus");
 const perfOutputEl = document.getElementById("perfOutput");
+
+// Statistics UI
+const refreshStatsBtn = document.getElementById("refreshStats");
+const statsStatusEl = document.getElementById("statsStatus");
+const statsOutputEl = document.getElementById("statsOutput");
 
 // Transactions UI
 const refreshTxBtn = document.getElementById("refreshTx");
@@ -64,19 +76,22 @@ function setTxStatus(msg) { txStatusEl.textContent = msg; }
 function setAddEditStatus(msg) { addEditStatusEl.textContent = msg; }
 function setPortfolioStatus(msg) { portfolioStatusEl.textContent = msg; }
 function setPerfStatus(msg) { perfStatusEl.textContent = msg; }
+function setStatsStatus(msg) { statsStatusEl.textContent = msg; }
 
 function setActiveTab(which) {
-  [tabPortfolio, tabPerformance, tabTransactions, tabAddEdit].forEach(b => b.classList.remove("active"));
+  [tabPortfolio, tabPerformance, tabTransactions, tabAddEdit, tabStatistics].forEach(b => b.classList.remove("active"));
   if (which === "portfolio") tabPortfolio.classList.add("active");
   if (which === "performance") tabPerformance.classList.add("active");
   if (which === "transactions") tabTransactions.classList.add("active");
   if (which === "addedit") tabAddEdit.classList.add("active");
+  if (which === "statistics") tabStatistics.classList.add("active");
 
-  [sectionPortfolio, sectionPerformance, sectionTransactions, sectionAddEdit].forEach(s => s.classList.remove("active"));
+  [sectionPortfolio, sectionPerformance, sectionTransactions, sectionAddEdit, sectionStatistics].forEach(s => s.classList.remove("active"));
   if (which === "portfolio") sectionPortfolio.classList.add("active");
   if (which === "performance") sectionPerformance.classList.add("active");
   if (which === "transactions") sectionTransactions.classList.add("active");
   if (which === "addedit") sectionAddEdit.classList.add("active");
+  if (which === "statistics") sectionStatistics.classList.add("active");
 }
 
 tabPortfolio.addEventListener("click", () => setActiveTab("portfolio"));
@@ -86,6 +101,10 @@ tabPerformance.addEventListener("click", () => {
 });
 tabTransactions.addEventListener("click", () => setActiveTab("transactions"));
 tabAddEdit.addEventListener("click", () => setActiveTab("addedit"));
+tabStatistics.addEventListener("click", () => {
+  setActiveTab("statistics");
+  void refreshStatistics();
+});
 
 function enterEditMode(tx) {
   editingTxId = tx.id;
@@ -118,6 +137,8 @@ function setLoggedInUI(email) {
   logoutBtn.style.display = "inline-block";
 
   menuEl.style.display = "flex";
+  postLoginPanel.style.display = "grid";
+  inceptionPanel.style.display = "block";
   appBox.style.display = "block";
 
   setStatus(
@@ -132,6 +153,8 @@ function setLoggedOutUI() {
   logoutBtn.style.display = "none";
 
   menuEl.style.display = "none";
+  postLoginPanel.style.display = "none";
+  inceptionPanel.style.display = "none";
   appBox.style.display = "none";
 
   setStatus("Not logged in.");
@@ -139,10 +162,15 @@ function setLoggedOutUI() {
   setAddEditStatus("");
   setPortfolioStatus("");
   setPerfStatus("");
+  setStatsStatus("");
 
   txListEl.innerHTML = "";
   portfolioOutputEl.innerHTML = "";
   perfOutputEl.innerHTML = "";
+  statsOutputEl.innerHTML = "";
+  topPerfMetricsEl.textContent = "";
+  inceptionChartEl.innerHTML = "";
+  inceptionChartCaptionEl.textContent = "";
   lastPortfolioPayload = null;
 
   exitEditMode();
@@ -281,6 +309,376 @@ async function refreshTransactions() {
 }
 
 refreshTxBtn.addEventListener("click", refreshTransactions);
+
+function fmtPct(value) {
+  if (!Number.isFinite(value)) return "—";
+  return `${value.toFixed(2)}%`;
+}
+
+function fmtNum(value, digits = 2) {
+  if (!Number.isFinite(value)) return "—";
+  return Number(value).toFixed(digits);
+}
+
+function quantile(sortedVals, q) {
+  if (!sortedVals.length) return null;
+  const pos = (sortedVals.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sortedVals[lo];
+  return sortedVals[lo] + (sortedVals[hi] - sortedVals[lo]) * (pos - lo);
+}
+
+function toISODate(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+function previousFriday(fromDate = new Date()) {
+  const d = new Date(fromDate);
+  const day = d.getUTCDay();
+  const daysSinceFriday = (day + 2) % 7;
+  d.setUTCDate(d.getUTCDate() - (daysSinceFriday === 0 ? 7 : daysSinceFriday));
+  return toISODate(d);
+}
+
+async function buildPortfolioHistory() {
+  const { data: txRows, error: txErr } = await supabaseClient
+    .from("transactions")
+    .select("symbol, side, quantity, txn_date")
+    .order("txn_date", { ascending: true });
+
+  if (txErr) throw new Error(`Transactions error: ${txErr.message}`);
+  if (!txRows?.length) return { history: [], dailyReturns: [] };
+
+  const symbols = [...new Set(txRows.map((r) => String(r.symbol || "").trim().toUpperCase()).filter(Boolean))];
+  const startDate = txRows[0].txn_date;
+  const today = new Date().toISOString().slice(0, 10);
+
+  const { data: priceRows, error: priceErr } = await supabaseClient
+    .from("prices_daily")
+    .select("symbol, date, close_native, currency")
+    .in("symbol", symbols)
+    .gte("date", startDate)
+    .lte("date", today)
+    .order("date", { ascending: true });
+
+  if (priceErr) throw new Error(`prices_daily error: ${priceErr.message}`);
+
+  const currencies = [...new Set((priceRows || []).map((r) => r.currency).filter((c) => c && c !== "EUR"))];
+  let fxRows = [];
+  if (currencies.length) {
+    const { data, error } = await supabaseClient
+      .from("fx_daily")
+      .select("ccy, date, eur_to_ccy")
+      .in("ccy", currencies)
+      .gte("date", startDate)
+      .lte("date", today)
+      .order("date", { ascending: true });
+    if (error) throw new Error(`fx_daily error: ${error.message}`);
+    fxRows = data || [];
+  }
+
+  const txByDate = new Map();
+  for (const tx of txRows) {
+    const d = tx.txn_date;
+    if (!txByDate.has(d)) txByDate.set(d, []);
+    txByDate.get(d).push({
+      symbol: tx.symbol.toUpperCase(),
+      side: tx.side,
+      quantity: Number(tx.quantity),
+    });
+  }
+
+  const pxBySymbol = new Map();
+  const datesSet = new Set([startDate, today]);
+  for (const p of priceRows || []) {
+    const sym = p.symbol.toUpperCase();
+    if (!pxBySymbol.has(sym)) pxBySymbol.set(sym, []);
+    pxBySymbol.get(sym).push({ date: p.date, close: Number(p.close_native), ccy: p.currency });
+    datesSet.add(p.date);
+  }
+  for (const d of txByDate.keys()) datesSet.add(d);
+
+  const fxByCcy = new Map();
+  for (const fx of fxRows) {
+    const ccy = fx.ccy;
+    if (!fxByCcy.has(ccy)) fxByCcy.set(ccy, []);
+    fxByCcy.get(ccy).push({ date: fx.date, eur_to_ccy: Number(fx.eur_to_ccy) });
+  }
+
+  const sortedDates = [...datesSet].sort();
+  const holdings = new Map();
+  const pxPtr = new Map();
+  const fxPtr = new Map();
+  const lastPrice = new Map();
+  const lastFx = new Map();
+  const history = [];
+
+  for (const d of sortedDates) {
+    for (const [sym, series] of pxBySymbol.entries()) {
+      let ptr = pxPtr.get(sym) || 0;
+      while (ptr < series.length && series[ptr].date <= d) {
+        lastPrice.set(sym, series[ptr]);
+        ptr += 1;
+      }
+      pxPtr.set(sym, ptr);
+    }
+
+    for (const [ccy, series] of fxByCcy.entries()) {
+      let ptr = fxPtr.get(ccy) || 0;
+      while (ptr < series.length && series[ptr].date <= d) {
+        lastFx.set(ccy, series[ptr].eur_to_ccy);
+        ptr += 1;
+      }
+      fxPtr.set(ccy, ptr);
+    }
+
+    for (const tx of txByDate.get(d) || []) {
+      const curr = holdings.get(tx.symbol) || 0;
+      const delta = tx.side === "BUY" ? tx.quantity : -tx.quantity;
+      holdings.set(tx.symbol, curr + delta);
+    }
+
+    let valueEur = 0;
+    for (const [sym, qty] of holdings.entries()) {
+      if (!Number.isFinite(qty) || qty <= 0) continue;
+      const px = lastPrice.get(sym);
+      if (!px || !Number.isFinite(px.close)) continue;
+      const ccy = px.ccy;
+      const fx = ccy === "EUR" ? 1 : (lastFx.get(ccy) ? 1 / lastFx.get(ccy) : null);
+      if (!Number.isFinite(fx)) continue;
+      valueEur += qty * px.close * fx;
+    }
+    history.push({ date: d, value: valueEur });
+  }
+
+  const cleaned = history.filter((h) => Number.isFinite(h.value) && h.value > 0);
+  const dailyReturns = [];
+  for (let i = 1; i < cleaned.length; i += 1) {
+    const prev = cleaned[i - 1].value;
+    const cur = cleaned[i].value;
+    if (prev > 0) dailyReturns.push({ date: cleaned[i].date, r: (cur / prev) - 1 });
+  }
+
+  return { history: cleaned, dailyReturns };
+}
+
+function drawInceptionChart(history) {
+  if (!history.length) {
+    inceptionChartEl.innerHTML = "";
+    inceptionChartCaptionEl.textContent = "Not enough data for chart yet.";
+    return;
+  }
+  const values = history.map((h) => h.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(max - min, 1e-9);
+  const points = history.map((h, i) => {
+    const x = (i / Math.max(history.length - 1, 1)) * 600;
+    const y = 170 - ((h.value - min) / span) * 150;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+
+  inceptionChartEl.innerHTML = `
+    <line x1="0" y1="170" x2="600" y2="170" stroke="#ddd" />
+    <polyline points="${points}" fill="none" stroke="#111" stroke-width="2" />
+  `;
+  inceptionChartCaptionEl.textContent = `Since inception: ${history[0].date} → ${history[history.length - 1].date}`;
+}
+
+function computeToplineReturns(history) {
+  if (!history.length) return { h24: null, ytd: null, m6: null, y1: null };
+  const latest = history[history.length - 1];
+  const lookup = (target) => {
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i].date <= target) return history[i].value;
+    }
+    return null;
+  };
+
+  const latestDate = new Date(`${latest.date}T00:00:00Z`);
+  const d24 = new Date(latestDate); d24.setUTCDate(d24.getUTCDate() - 1);
+  const d6m = new Date(latestDate); d6m.setUTCMonth(d6m.getUTCMonth() - 6);
+  const d1y = new Date(latestDate); d1y.setUTCFullYear(d1y.getUTCFullYear() - 1);
+  const ytdStart = `${latestDate.getUTCFullYear()}-01-01`;
+
+  const mk = (base) => (Number.isFinite(base) && base > 0 ? ((latest.value / base) - 1) * 100 : null);
+  return {
+    h24: mk(lookup(toISODate(d24))),
+    ytd: mk(lookup(ytdStart)),
+    m6: mk(lookup(toISODate(d6m))),
+    y1: mk(lookup(toISODate(d1y))),
+  };
+}
+
+function renderToplineMetrics(m) {
+  topPerfMetricsEl.innerHTML = `
+    <div><strong>24h:</strong> ${fmtPct(m.h24)}</div>
+    <div><strong>YTD:</strong> ${fmtPct(m.ytd)}</div>
+    <div><strong>6 months:</strong> ${fmtPct(m.m6)}</div>
+    <div><strong>1 year:</strong> ${fmtPct(m.y1)}</div>
+  `;
+}
+
+function computeStatistics(history, dailyReturns) {
+  const todayVal = history.at(-1)?.value || 0;
+  if (!history.length || dailyReturns.length < 2) return null;
+
+  let peak = history[0].value;
+  let maxDrawdown = 0;
+  for (const h of history) {
+    peak = Math.max(peak, h.value);
+    if (peak > 0) maxDrawdown = Math.min(maxDrawdown, (h.value / peak) - 1);
+  }
+
+  const oneYear = dailyReturns.slice(-252).map((x) => x.r);
+  const mean = oneYear.reduce((a, b) => a + b, 0) / Math.max(oneYear.length, 1);
+  const variance = oneYear.reduce((acc, r) => acc + ((r - mean) ** 2), 0) / Math.max(oneYear.length - 1, 1);
+  const std = Math.sqrt(variance);
+
+  const mkHorizon = (window) => {
+    if (history.length <= window) return { varPct: null, cvarPct: null, varEur: null, cvarEur: null };
+    const horizonReturns = [];
+    for (let i = window; i < history.length; i += 1) {
+      const base = history[i - window].value;
+      const now = history[i].value;
+      if (base > 0) horizonReturns.push((now / base) - 1);
+    }
+    const losses = horizonReturns.map((r) => -r).sort((a, b) => a - b);
+    const varPct = quantile(losses, 0.95);
+    const tail = losses.filter((l) => l >= varPct);
+    const cvarPct = tail.length ? tail.reduce((a, b) => a + b, 0) / tail.length : null;
+    return {
+      varPct,
+      cvarPct,
+      varEur: Number.isFinite(varPct) ? varPct * todayVal : null,
+      cvarEur: Number.isFinite(cvarPct) ? cvarPct * todayVal : null,
+    };
+  };
+
+  const m3 = mkHorizon(63);
+  const m6 = mkHorizon(126);
+
+  return [
+    { key: "max_drawdown", label: "Maximum drawdown", value: maxDrawdown * 100, unit: "%" },
+    { key: "variance_1y", label: "Variance (1 year)", value: variance, unit: "return²" },
+    { key: "std_1y", label: "STD (1 year)", value: std * 100, unit: "%" },
+    { key: "var_3m_95", label: "3-months-95% VaR", value: m3.varPct * 100, unit: "%" },
+    { key: "cvar_3m_95_eur", label: "3-months-95% CVaR (EUR)", value: m3.cvarEur, unit: "EUR" },
+    { key: "var_6m_95", label: "6-months-95% VaR", value: m6.varPct * 100, unit: "%" },
+    { key: "cvar_6m_95_eur", label: "6-months-95% CVaR (EUR)", value: m6.cvarEur, unit: "EUR" },
+  ];
+}
+
+async function persistStatistics(stats) {
+  const session = await getSessionOrThrow();
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = stats.map((s) => ({
+    user_id: session.user.id,
+    as_of_date: today,
+    metric_key: s.key,
+    metric_label: s.label,
+    metric_value: s.value,
+    metric_unit: s.unit,
+  }));
+
+  const { error } = await supabaseClient.from("portfolio_statistics_history").insert(rows);
+  if (error) {
+    setStatsStatus(`Stats computed, but storing history failed: ${error.message}`);
+  }
+}
+
+async function loadHistoricalStatisticsRows() {
+  const session = await getSessionOrThrow();
+  const { data, error } = await supabaseClient
+    .from("portfolio_statistics_history")
+    .select("metric_key, as_of_date, metric_value")
+    .eq("user_id", session.user.id)
+    .order("as_of_date", { ascending: false });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+function renderStatistics(stats, historyRows) {
+  const today = new Date().toISOString().slice(0, 10);
+  const prevFri = previousFriday(new Date());
+  const map = new Map();
+  for (const r of historyRows) {
+    if (!map.has(r.metric_key)) map.set(r.metric_key, new Map());
+    map.get(r.metric_key).set(r.as_of_date, Number(r.metric_value));
+  }
+
+  let html = `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Statistic</th>
+            <th class="num">Today (${today})</th>
+            <th class="num">Preceding Friday (${prevFri})</th>
+            <th>Unit</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  for (const s of stats) {
+    const byDate = map.get(s.key) || new Map();
+    const todayValue = byDate.get(today) ?? s.value;
+    const prevValue = byDate.get(prevFri);
+    const digits = s.unit === "return²" ? 6 : 2;
+    html += `
+      <tr>
+        <td>${s.label}</td>
+        <td class="num">${fmtNum(todayValue, digits)}</td>
+        <td class="num">${fmtNum(prevValue, digits)}</td>
+        <td>${s.unit}</td>
+      </tr>
+    `;
+  }
+
+  html += `
+        </tbody>
+      </table>
+    </div>
+    <div class="muted" style="margin-top:10px;">
+      <strong>How the statistics are computed:</strong><br/>
+      • Maximum drawdown: minimum value of (Portfolio Value / Running Peak - 1).<br/>
+      • Variance (1 year): sample variance of daily portfolio returns over the last 252 observations.<br/>
+      • STD (1 year): square root of the 1-year variance.<br/>
+      • 3M/6M 95% VaR: historical-simulation loss quantile (95th percentile) of rolling 3-month (63 days) and 6-month (126 days) returns.<br/>
+      • 3M/6M 95% CVaR (EUR): average tail loss beyond VaR converted into EUR using current portfolio value.
+    </div>
+  `;
+  statsOutputEl.innerHTML = html;
+}
+
+async function refreshStatistics() {
+  setStatsStatus("Computing statistics...");
+  try {
+    const { history, dailyReturns } = await buildPortfolioHistory();
+    const stats = computeStatistics(history, dailyReturns);
+    if (!stats) {
+      setStatsStatus("Not enough history to compute statistics yet.");
+      statsOutputEl.innerHTML = "";
+      return;
+    }
+
+    await persistStatistics(stats);
+    let historyRows = [];
+    try {
+      historyRows = await loadHistoricalStatisticsRows();
+    } catch (_e) {
+      // Table can be absent; keep showing current values only.
+    }
+    renderStatistics(stats, historyRows);
+    setStatsStatus("Statistics refreshed ✅");
+  } catch (e) {
+    setStatsStatus(`Statistics error: ${e.message}`);
+  }
+}
+
+refreshStatsBtn.addEventListener("click", refreshStatistics);
 
 /* ---------- Portfolio + Performance ---------- */
 
@@ -436,6 +834,10 @@ async function loadPortfolioAndPerformance() {
     setPerfStatus("Performance loaded ✅");
     renderPerformance(data);
 
+    const { history } = await buildPortfolioHistory();
+    renderToplineMetrics(computeToplineReturns(history));
+    drawInceptionChart(history);
+
   } catch (e) {
     const msg = "Fetch failed:\n" + e.message;
     setPortfolioStatus(msg);
@@ -536,6 +938,8 @@ loginBtn.addEventListener("click", async () => {
 
   setLoggedInUI(data.user.email);
   await refreshTransactions();
+  await loadPortfolioAndPerformance();
+  await refreshStatistics();
 });
 
 logoutBtn.addEventListener("click", async () => {
@@ -547,6 +951,9 @@ logoutBtn.addEventListener("click", async () => {
 
 /* ---------- Init ---------- */
 (async function init() {
+  // Keep post-login content hidden while session is being resolved.
+  setLoggedOutUI();
+
   const { data, error } = await supabaseClient.auth.getSession();
   if (error) { setStatus("Session error: " + error.message); return; }
 
@@ -554,6 +961,8 @@ logoutBtn.addEventListener("click", async () => {
   if (session?.user?.email) {
     setLoggedInUI(session.user.email);
     await refreshTransactions();
+    await loadPortfolioAndPerformance();
+    await refreshStatistics();
   } else {
     setLoggedOutUI();
   }

@@ -108,7 +108,8 @@ begin
       h.symbol,
       h.qty,
       p.close_native,
-      p.currency
+      p.currency,
+      lb.last_buy_price_eur
     from holdings h
     left join lateral (
       select pd.close_native, pd.currency
@@ -118,18 +119,34 @@ begin
       order by pd.date desc
       limit 1
     ) p on true
+    left join lateral (
+      select t.price::numeric as last_buy_price_eur
+      from public.transactions t
+      where t.user_id = h.user_id
+        and upper(trim(t.symbol)) = h.symbol
+        and t.side = 'BUY'
+        and t.txn_date <= h.valuation_date
+      order by t.txn_date desc, t.created_at desc
+      limit 1
+    ) lb on true
   ),
   eur_valued as (
     select
       ph.user_id,
       ph.valuation_date,
-      ph.qty * ph.close_native * (
-        case
-          when ph.currency = 'EUR' then 1
-          when fx.eur_to_ccy is not null and fx.eur_to_ccy <> 0 then 1 / fx.eur_to_ccy
-          else null
-        end
-      ) as value_eur
+      case
+        when ph.close_native is not null then
+          ph.qty * ph.close_native * (
+            case
+              when ph.currency = 'EUR' then 1
+              when fx.eur_to_ccy is not null and fx.eur_to_ccy <> 0 then 1 / fx.eur_to_ccy
+              else null
+            end
+          )
+        when ph.last_buy_price_eur is not null then
+          ph.qty * ph.last_buy_price_eur
+        else null
+      end as value_eur
     from priced_holdings ph
     left join lateral (
       select f.eur_to_ccy
@@ -139,7 +156,7 @@ begin
       order by f.date desc
       limit 1
     ) fx on ph.currency <> 'EUR'
-    where ph.close_native is not null
+    where ph.close_native is not null or ph.last_buy_price_eur is not null
   )
   insert into public.portfolio_daily_value (user_id, valuation_date, portfolio_value_eur, refreshed_at)
   select

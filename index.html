@@ -62,6 +62,10 @@
     }
 
     .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+    .auth-panel.hidden {
+      display: none;
+    }
     #status, #txStatus, #portfolioStatus, #perfStatus, #addEditStatus {
       white-space: pre-wrap;
       margin-top: 10px;
@@ -70,24 +74,52 @@
     }
 
     /* Nav */
-    .menu-header {
+    .topbar {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 10px;
       display: flex;
-      justify-content: flex-end;
-      margin: 0 0 8px 0;
+      align-items: center;
+      gap: 12px;
+      position: relative;
     }
 
     .hamburger {
-      font-size: 22px;
+      font-size: 28px;
       line-height: 1;
-      padding: 6px 10px;
+      padding: 8px 14px;
       background: #fff;
+      border-color: #cfcfcf;
+    }
+
+    .status-badge {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 20px;
+      color: #111;
+      white-space: pre-line;
+      line-height: 1.4;
+      flex: 1;
+      max-width: 520px;
     }
 
     .nav {
       display: none;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin: 10px 0 0 0;
+      position: absolute;
+      top: calc(100% + 8px);
+      left: 10px;
+      min-width: 220px;
+      z-index: 8;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.12);
+      padding: 8px;
+      flex-direction: column;
+      gap: 8px;
     }
 
     .nav.open {
@@ -97,6 +129,8 @@
     .nav button {
       background: #fff;
       border-color: #ddd;
+      text-align: left;
+      width: 100%;
     }
 
     .nav button.active {
@@ -110,7 +144,7 @@
 
     .post-login-layout {
       display: grid;
-      grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.3fr);
+      grid-template-columns: 1fr;
       gap: 14px;
       margin-top: 12px;
       align-items: start;
@@ -172,9 +206,13 @@
       h1 { font-size: 20px; }
     }
 
-    @media (max-width: 840px) {
-      .post-login-layout {
-        grid-template-columns: 1fr;
+    @media (max-width: 700px) {
+      .topbar {
+        align-items: flex-start;
+      }
+
+      .status-badge {
+        font-size: 19px;
       }
     }
   </style>
@@ -187,38 +225,39 @@
 
   <!-- Auth box -->
   <div class="box">
-    <h2 style="margin:0 0 10px 0;">Account</h2>
+    <div id="authPanel" class="auth-panel">
+      <h2 style="margin:0 0 10px 0;">Account</h2>
 
-    <div class="row">
-      <label>Email</label><br/>
-      <input id="email" type="email" placeholder="you@example.com" />
+      <div class="row">
+        <label>Email</label><br/>
+        <input id="email" type="email" placeholder="you@example.com" />
+      </div>
+
+      <div class="row">
+        <label>Password</label><br/>
+        <input id="password" type="password" placeholder="Password" />
+      </div>
+
+      <div class="btn-row">
+        <button id="signup">Sign up</button>
+        <button id="login" class="primary">Log in</button>
+        <button id="logout" style="display:none;">Log out</button>
+      </div>
+
+      <div id="status"></div>
     </div>
-
-    <div class="row">
-      <label>Password</label><br/>
-      <input id="password" type="password" placeholder="Password" />
-    </div>
-
-    <div class="btn-row">
-      <button id="signup">Sign up</button>
-      <button id="login" class="primary">Log in</button>
-      <button id="logout" style="display:none;">Log out</button>
-    </div>
-
-    <div id="status"></div>
 
     <div id="postLoginPanel" class="post-login-layout" style="display:none;">
-      <!-- Menu (hidden until logged in) -->
-      <div>
-        <div class="menu-header">
+      <div class="topbar">
           <button id="menuToggle" class="hamburger" type="button" aria-label="Toggle menu" aria-expanded="false">☰</button>
-        </div>
-        <div id="menu" class="nav" style="margin-top:0;">
+        <div id="loggedInHint" class="status-badge"></div>
+        <div id="menu" class="nav">
         <button id="tabPortfolio" class="active" type="button">Portfolio</button>
         <button id="tabPerformance" type="button">Performance</button>
-        <button id="tabTransactions" type="button">Transaction</button>
+        <button id="tabTransactions" type="button">Transactions</button>
         <button id="tabAddEdit" type="button">Add/Edit</button>
         <button id="tabStatistics" type="button">Statistics</button>
+        <button id="menuLogout" class="danger" type="button">Log out</button>
         </div>
       </div>
 

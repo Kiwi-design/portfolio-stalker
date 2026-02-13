@@ -772,68 +772,168 @@ function renderPortfolioTable(results) {
 function renderPerformance(payload) {
   const perf = payload.performance || [];
   const totals = payload.performance_totals || {};
+
+  let html = "";
   if (!perf.length) {
-    perfOutputEl.innerHTML = "<p>No positions to calculate performance.</p>";
+    html += "<p>No positions to calculate performance.</p>";
+  } else {
+    html += `
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th class="num">Quantity</th>
+              <th class="num">Avg Cost (native)</th>
+              <th class="num">Avg Sold (native)</th>
+              <th class="num">Current (native)</th>
+              <th>Currency</th>
+              <th class="num">Unrealized (EUR)</th>
+              <th class="num">Percentage</th>
+              <th class="num">Realized (EUR)</th>
+              <th class="num">Percentage</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+
+    for (const r of perf) {
+      const isClosed = Math.abs(Number(r.quantity ?? 0)) <= 1e-12;
+      html += `
+        <tr${isClosed ? ' style="background:#ffecec;"' : ''}>
+          <td>${r.name || ""}</td>
+          <td class="num">${Number(r.quantity).toFixed(4)}</td>
+          <td class="num">${Number(r.avg_cost ?? 0).toFixed(4)}</td>
+          <td class="num">${Number(r.avg_sold ?? 0).toFixed(4)}</td>
+          <td class="num">${Number(r.current_price ?? 0).toFixed(4)}</td>
+          <td>${r.currency || ""}</td>
+          <td class="num">${Number(r.unrealized_eur ?? 0).toFixed(2)}</td>
+          <td class="num">${Number(r.percent_unrealized ?? 0).toFixed(2)}%</td>
+          <td class="num">${Number(r.realized_eur ?? 0).toFixed(2)}</td>
+          <td class="num">${Number(r.percent_realized ?? 0).toFixed(2)}%</td>
+        </tr>
+      `;
+    }
+
+    html += `
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">Totals</td>
+              <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_unrealized_eur ?? 0).toFixed(2)}</td>
+              <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_percent ?? 0).toFixed(2)}%</td>
+              <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_realized_eur ?? 0).toFixed(2)}</td>
+              <td class="num" style="font-weight:700; border-top:2px solid #ccc;">-</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div class="muted" style="margin-top:8px;">
+        Total % is portfolio-weighted: total_unrealized_eur / total_cost_basis_eur.
+      </div>
+    `;
+  }
+
+  html += '<div id="twrDailyTable" style="margin-top:14px;"></div>';
+  perfOutputEl.innerHTML = html;
+}
+
+
+async function computeDailyTwrSeries(history) {
+  if (!history.length) return [];
+
+  const session = await getSessionOrThrow();
+  const { data: txRows, error } = await supabaseClient
+    .from("transactions")
+    .select("txn_date, side, quantity, price")
+    .eq("user_id", session.user.id)
+    .order("txn_date", { ascending: true });
+
+  if (error) throw new Error(`Transactions error: ${error.message}`);
+
+  const netFlowByDate = new Map();
+  for (const tx of txRows || []) {
+    const quantity = Number(tx.quantity);
+    const priceEur = Number(tx.price);
+    if (!Number.isFinite(quantity) || !Number.isFinite(priceEur)) continue;
+    const flow = tx.side === "BUY" ? (quantity * priceEur) : (-quantity * priceEur);
+    netFlowByDate.set(tx.txn_date, (netFlowByDate.get(tx.txn_date) || 0) + flow);
+  }
+
+  const out = [];
+  let cumulative = 1;
+  for (let i = 1; i < history.length; i += 1) {
+    const prev = history[i - 1];
+    const cur = history[i];
+    const flow = Number(netFlowByDate.get(cur.date) || 0);
+    if (!(prev.value > 0)) continue;
+
+    const largeCashFlow = Math.abs(flow) >= (0.15 * prev.value);
+    const r = ((cur.value - flow) / prev.value) - 1;
+    cumulative *= (1 + r);
+
+    out.push({
+      date: cur.date,
+      marketValueEur: cur.value,
+      netExternalFlowEur: flow,
+      largeCashFlow,
+      dailyPct: r * 100,
+      cumulativePct: (cumulative - 1) * 100,
+    });
+  }
+
+  return out;
+}
+
+function renderDailyTwrTable(rows) {
+  const host = document.getElementById("twrDailyTable");
+  if (!host) return;
+
+  if (!rows.length) {
+    host.innerHTML = '<p class="muted">No daily TWR history yet.</p>';
     return;
   }
 
   let html = `
+    <h3 style="margin:0 0 8px 0;">Daily Time-Weighted Return (large cash flow policy: 15%)</h3>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>Name</th>
-            <th class="num">Quantity</th>
-            <th class="num">Avg Cost (native)</th>
-            <th class="num">Avg Sold (native)</th>
-            <th class="num">Current (native)</th>
-            <th>Currency</th>
-            <th class="num">Unrealized (EUR)</th>
-            <th class="num">Percentage</th>
-            <th class="num">Realized (EUR)</th>
-            <th class="num">Percentage</th>
+            <th>Date</th>
+            <th class="num">Portfolio value (EUR)</th>
+            <th class="num">Net external flow (EUR)</th>
+            <th>Large cash flow (≥15%)</th>
+            <th class="num">Daily TWR %</th>
+            <th class="num">Cumulated TWR %</th>
           </tr>
         </thead>
         <tbody>
   `;
 
-  for (const r of perf) {
-    const isClosed = Math.abs(Number(r.quantity ?? 0)) <= 1e-12;
+  for (const row of rows) {
     html += `
-      <tr${isClosed ? ' style="background:#ffecec;"' : ''}>
-        <td>${r.name || ""}</td>
-        <td class="num">${Number(r.quantity).toFixed(4)}</td>
-        <td class="num">${Number(r.avg_cost ?? 0).toFixed(4)}</td>
-        <td class="num">${Number(r.avg_sold ?? 0).toFixed(4)}</td>
-        <td class="num">${Number(r.current_price ?? 0).toFixed(4)}</td>
-        <td>${r.currency || ""}</td>
-        <td class="num">${Number(r.unrealized_eur ?? 0).toFixed(2)}</td>
-        <td class="num">${Number(r.percent_unrealized ?? 0).toFixed(2)}%</td>
-        <td class="num">${Number(r.realized_eur ?? 0).toFixed(2)}</td>
-        <td class="num">${Number(r.percent_realized ?? 0).toFixed(2)}%</td>
+      <tr>
+        <td>${row.date}</td>
+        <td class="num">${fmtNum(row.marketValueEur, 2)}</td>
+        <td class="num">${fmtNum(row.netExternalFlowEur, 2)}</td>
+        <td>${row.largeCashFlow ? "Yes" : "No"}</td>
+        <td class="num">${fmtPct(row.dailyPct)}</td>
+        <td class="num">${fmtPct(row.cumulativePct)}</td>
       </tr>
     `;
   }
 
   html += `
         </tbody>
-        <tfoot>
-          <tr>
-            <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">Totals</td>
-            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_unrealized_eur ?? 0).toFixed(2)}</td>
-            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_percent ?? 0).toFixed(2)}%</td>
-            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_realized_eur ?? 0).toFixed(2)}</td>
-            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">-</td>
-          </tr>
-        </tfoot>
       </table>
     </div>
     <div class="muted" style="margin-top:8px;">
-      Total % is portfolio-weighted: total_unrealized_eur / total_cost_basis_eur.
+      Formula: daily TWR = ((V_t - CF_t) / V_{t-1}) - 1, where CF_t is net BUY/SELL cash flow in EUR.
     </div>
   `;
 
-  perfOutputEl.innerHTML = html;
+  host.innerHTML = html;
 }
 
 async function loadPortfolioAndPerformance() {
@@ -866,6 +966,10 @@ async function loadPortfolioAndPerformance() {
     renderPerformance(data);
 
     await refreshOverviewGraph();
+
+    const { history } = await buildPortfolioHistory();
+    const twrRows = await computeDailyTwrSeries(history);
+    renderDailyTwrTable(twrRows);
 
   } catch (e) {
     const msg = "Fetch failed:\n" + e.message;

@@ -20,6 +20,7 @@ const inceptionChartCaptionEl = document.getElementById("inceptionChartCaption")
 
 // Menu + Sections
 const menuEl = document.getElementById("menu");
+const menuToggleBtn = document.getElementById("menuToggle");
 const appBox = document.getElementById("appBox");
 
 const tabPortfolio = document.getElementById("tabPortfolio");
@@ -94,16 +95,55 @@ function setActiveTab(which) {
   if (which === "statistics") sectionStatistics.classList.add("active");
 }
 
-tabPortfolio.addEventListener("click", () => setActiveTab("portfolio"));
+function setMenuOpen(isOpen) {
+  menuEl.classList.toggle("open", isOpen);
+  menuToggleBtn.setAttribute("aria-expanded", String(isOpen));
+}
+
+async function refreshOverviewGraph() {
+  try {
+    const { history } = await buildPortfolioHistory();
+    renderToplineMetrics(computeToplineReturns(history));
+    drawInceptionChart(history);
+  } catch (e) {
+    topPerfMetricsEl.textContent = "";
+    inceptionChartEl.innerHTML = "";
+    inceptionChartCaptionEl.textContent = `Chart error: ${e.message}`;
+  }
+}
+
+tabPortfolio.addEventListener("click", async () => {
+  appBox.style.display = "block";
+  setActiveTab("portfolio");
+  setMenuOpen(false);
+});
 tabPerformance.addEventListener("click", () => {
+  appBox.style.display = "block";
   setActiveTab("performance");
   if (lastPortfolioPayload?.performance) renderPerformance(lastPortfolioPayload);
+  setMenuOpen(false);
 });
-tabTransactions.addEventListener("click", () => setActiveTab("transactions"));
-tabAddEdit.addEventListener("click", () => setActiveTab("addedit"));
+tabTransactions.addEventListener("click", async () => {
+  appBox.style.display = "block";
+  setActiveTab("transactions");
+  await refreshTransactions();
+  setMenuOpen(false);
+});
+tabAddEdit.addEventListener("click", () => {
+  appBox.style.display = "block";
+  setActiveTab("addedit");
+  setMenuOpen(false);
+});
 tabStatistics.addEventListener("click", () => {
+  appBox.style.display = "block";
   setActiveTab("statistics");
   void refreshStatistics();
+  setMenuOpen(false);
+});
+
+menuToggleBtn.addEventListener("click", () => {
+  const isOpen = !menuEl.classList.contains("open");
+  setMenuOpen(isOpen);
 });
 
 function enterEditMode(tx) {
@@ -136,15 +176,14 @@ function setLoggedInUI(email) {
   loginBtn.style.display = "none";
   logoutBtn.style.display = "inline-block";
 
-  menuEl.style.display = "flex";
   postLoginPanel.style.display = "grid";
   inceptionPanel.style.display = "block";
-  appBox.style.display = "block";
+  appBox.style.display = "none";
+  setMenuOpen(false);
 
   setStatus(
-    `Logged in as: ${email}\nUse the tabs below to view your portfolio, check performance, and manage transactions.`
+    `Logged in as: ${email}\nUse the menu to open a section.`
   );
-  setActiveTab("portfolio");
 }
 
 function setLoggedOutUI() {
@@ -152,10 +191,10 @@ function setLoggedOutUI() {
   loginBtn.style.display = "inline-block";
   logoutBtn.style.display = "none";
 
-  menuEl.style.display = "none";
   postLoginPanel.style.display = "none";
   inceptionPanel.style.display = "none";
   appBox.style.display = "none";
+  setMenuOpen(false);
 
   setStatus("Not logged in.");
   setTxStatus("");
@@ -834,9 +873,7 @@ async function loadPortfolioAndPerformance() {
     setPerfStatus("Performance loaded ✅");
     renderPerformance(data);
 
-    const { history } = await buildPortfolioHistory();
-    renderToplineMetrics(computeToplineReturns(history));
-    drawInceptionChart(history);
+    await refreshOverviewGraph();
 
   } catch (e) {
     const msg = "Fetch failed:\n" + e.message;
@@ -921,7 +958,7 @@ signupBtn.addEventListener("click", async () => {
 
   if (data.session?.user?.email) {
     setLoggedInUI(data.session.user.email);
-    await refreshTransactions();
+    await refreshOverviewGraph();
   } else {
     setStatus("Sign up successful. Check your email if confirmation is required, then log in.");
   }
@@ -937,9 +974,7 @@ loginBtn.addEventListener("click", async () => {
   if (error) { setStatus("Login error: " + error.message); return; }
 
   setLoggedInUI(data.user.email);
-  await refreshTransactions();
-  await loadPortfolioAndPerformance();
-  await refreshStatistics();
+  await refreshOverviewGraph();
 });
 
 logoutBtn.addEventListener("click", async () => {
@@ -960,9 +995,7 @@ logoutBtn.addEventListener("click", async () => {
   const session = data.session;
   if (session?.user?.email) {
     setLoggedInUI(session.user.email);
-    await refreshTransactions();
-    await loadPortfolioAndPerformance();
-    await refreshStatistics();
+    await refreshOverviewGraph();
   } else {
     setLoggedOutUI();
   }

@@ -228,6 +228,28 @@ class handler(BaseHTTPRequestHandler):
                 for r in rows:
                     entry[r["date"]] = r
 
+            def ensure_price_anchor_on_date(symbol, anchor_date):
+                rows = load_prices(symbol)
+                if anchor_date in rows:
+                    return
+                # On non-trading BUY dates (weekends/holidays), copy the first
+                # available later close so history starts on the BUY date.
+                next_dates = [d for d in rows.keys() if d >= anchor_date]
+                if not next_dates:
+                    return
+                first_after = rows[min(next_dates)]
+                save_prices(
+                    symbol,
+                    [{
+                        "symbol": symbol,
+                        "date": anchor_date,
+                        "close_native": float(first_after["close_native"]),
+                        "currency": first_after["currency"],
+                        "source": "synthetic_anchor",
+                        "updated_at": now_utc.isoformat(),
+                    }],
+                )
+
             def save_fx(ccy, rows):
                 if not rows:
                     return
@@ -235,6 +257,24 @@ class handler(BaseHTTPRequestHandler):
                 entry = fx_cache.setdefault(ccy, {})
                 for r in rows:
                     entry[r["date"]] = r
+
+            def ensure_fx_anchor_on_date(ccy, anchor_date):
+                rows = load_fx(ccy)
+                if anchor_date in rows:
+                    return
+                next_dates = [d for d in rows.keys() if d >= anchor_date]
+                if not next_dates:
+                    return
+                first_after = rows[min(next_dates)]
+                save_fx(
+                    ccy,
+                    [{
+                        "ccy": ccy,
+                        "date": anchor_date,
+                        "eur_to_ccy": float(first_after["eur_to_ccy"]),
+                        "updated_at": now_utc.isoformat(),
+                    }],
+                )
 
             def load_prices(symbol):
                 if symbol in price_cache:
@@ -308,6 +348,7 @@ class handler(BaseHTTPRequestHandler):
                             }
                         )
                     save_prices(symbol, to_save)
+                ensure_price_anchor_on_date(symbol, min_needed_date)
                 ensured_symbol_min[symbol] = min_needed_date
 
             def ensure_fx_history(ccy, min_needed_date):
@@ -349,6 +390,7 @@ class handler(BaseHTTPRequestHandler):
                             }
                         )
                     save_fx(ccy, to_save)
+                ensure_fx_anchor_on_date(ccy, min_needed_date)
                 ensured_fx_min[ccy] = min_needed_date
 
             def latest_row_on_or_before(table, date):

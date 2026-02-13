@@ -23,7 +23,9 @@
       border-radius: 10px;
       background: #fff;
       margin-bottom: 16px;
+      width: 100%;
       max-width: 980px;
+      box-sizing: border-box;
     }
 
     .row { margin-bottom: 10px; }
@@ -163,12 +165,12 @@
       border-radius: 10px;
       padding: 10px;
       background: #fafafa;
-      min-height: 240px;
+      min-height: 320px;
     }
 
     #inceptionChart {
       width: 100%;
-      height: 240px;
+      height: 320px;
       display: block;
     }
 
@@ -263,14 +265,14 @@
 
       <div id="inceptionPanel" class="chart-wrap" style="display:none;">
         <div class="metrics-inline" id="topPerfMetrics"></div>
-        <svg id="inceptionChart" viewBox="0 0 600 240" preserveAspectRatio="none" aria-label="Portfolio performance since inception"></svg>
+        <svg id="inceptionChart" viewBox="0 0 600 320" preserveAspectRatio="none" aria-label="Portfolio performance since inception"></svg>
         <div class="muted" id="inceptionChartCaption" style="margin-top:6px;"></div>
       </div>
     </div>
   </div>
 
   <!-- App sections -->
-  <div id="appBox" style="display:none; max-width:980px;">
+  <div id="appBox" style="display:none; width:100%; max-width:980px;">
 
     <!-- PORTFOLIO -->
     <div id="sectionPortfolio" class="box section active">

@@ -112,8 +112,8 @@ async function doLogout() {
 
 async function refreshOverviewGraph() {
   try {
-    const { history } = await buildPortfolioHistory();
-    renderToplineMetrics(computeToplineReturns(history));
+    const { history, dailyReturns } = await buildPortfolioHistory();
+    renderToplineMetrics(computeToplineReturns(history, dailyReturns));
     drawInceptionChart(history);
   } catch (e) {
     topPerfMetricsEl.textContent = "";
@@ -410,7 +410,7 @@ function previousFriday(fromDate = new Date()) {
 async function buildPortfolioHistory() {
   const { data: txRows, error: txErr } = await supabaseClient
     .from("transactions")
-    .select("symbol, side, quantity, txn_date")
+    .select("symbol, side, quantity, price, txn_date")
     .order("txn_date", { ascending: true });
 
   if (txErr) throw new Error(`Transactions error: ${txErr.message}`);
@@ -445,13 +445,18 @@ async function buildPortfolioHistory() {
   }
 
   const txByDate = new Map();
+  const netFlowByDate = new Map();
   for (const tx of txRows) {
     const d = tx.txn_date;
     if (!txByDate.has(d)) txByDate.set(d, []);
+    const quantity = Number(tx.quantity);
+    const priceEur = Number(tx.price);
+    const signedCash = tx.side === "BUY" ? (quantity * priceEur) : (-quantity * priceEur);
+    netFlowByDate.set(d, (netFlowByDate.get(d) || 0) + (Number.isFinite(signedCash) ? signedCash : 0));
     txByDate.get(d).push({
       symbol: tx.symbol.toUpperCase(),
       side: tx.side,
-      quantity: Number(tx.quantity),
+      quantity,
     });
   }
 
@@ -523,7 +528,8 @@ async function buildPortfolioHistory() {
   for (let i = 1; i < cleaned.length; i += 1) {
     const prev = cleaned[i - 1].value;
     const cur = cleaned[i].value;
-    if (prev > 0) dailyReturns.push({ date: cleaned[i].date, r: (cur / prev) - 1 });
+    const netFlow = Number(netFlowByDate.get(cleaned[i].date) || 0);
+    if (prev > 0) dailyReturns.push({ date: cleaned[i].date, r: (cur - prev - netFlow) / prev });
   }
 
   return { history: cleaned, dailyReturns };
@@ -537,8 +543,8 @@ function drawInceptionChart(history) {
   }
 
   const width = 600;
-  const height = 180;
-  const margin = { top: 10, right: 12, bottom: 28, left: 58 };
+  const height = 240;
+  const margin = { top: 12, right: 12, bottom: 40, left: 74 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
 
@@ -573,10 +579,17 @@ function drawInceptionChart(history) {
     }
   }
 
-  const xTickEls = monthTicks.map((m) => {
+  const minTickSpacing = 56;
+  const filteredMonthTicks = monthTicks.filter((m, idx) => {
+    if (idx === 0 || idx === monthTicks.length - 1) return true;
+    const prev = monthTicks[idx - 1];
+    return (xFor(m.idx) - xFor(prev.idx)) >= minTickSpacing;
+  });
+
+  const xTickEls = filteredMonthTicks.map((m) => {
     const x = xFor(m.idx);
     return `<line x1="${x}" y1="${height - margin.bottom}" x2="${x}" y2="${height - margin.bottom + 4}" stroke="#aaa" />
-      <text x="${x}" y="${height - 4}" text-anchor="middle" font-size="10" fill="#666">${m.label}</text>`;
+      <text x="${x}" y="${height - 8}" text-anchor="middle" font-size="10" fill="#666">${m.label}</text>`;
   }).join("\n");
 
   inceptionChartEl.innerHTML = `
@@ -589,14 +602,21 @@ function drawInceptionChart(history) {
   inceptionChartCaptionEl.textContent = `Since inception: ${history[0].date} → ${history[history.length - 1].date}`;
 }
 
-function computeToplineReturns(history) {
+function computeToplineReturns(history, dailyReturns) {
   if (!history.length) return { h24: null, ytd: null, m6: null, y1: null };
   const latest = history[history.length - 1];
-  const lookup = (target) => {
-    for (let i = history.length - 1; i >= 0; i -= 1) {
-      if (history[i].date <= target) return history[i].value;
-    }
-    return null;
+  const chainFrom = (targetDate) => {
+    const series = (dailyReturns || []).filter((row) => row.date > targetDate && Number.isFinite(row.r));
+    if (!series.length) return null;
+    let acc = 1;
+    for (const row of series) acc *= (1 + row.r);
+    return (acc - 1) * 100;
+  };
+
+  const firstDate = history[0].date;
+  const clampTarget = (isoDate) => {
+    if (isoDate < firstDate) return firstDate;
+    return isoDate;
   };
 
   const latestDate = new Date(`${latest.date}T00:00:00Z`);
@@ -605,12 +625,22 @@ function computeToplineReturns(history) {
   const d1y = new Date(latestDate); d1y.setUTCFullYear(d1y.getUTCFullYear() - 1);
   const ytdStart = `${latestDate.getUTCFullYear()}-01-01`;
 
-  const mk = (base) => (Number.isFinite(base) && base > 0 ? ((latest.value / base) - 1) * 100 : null);
+  const fallbackValueReturn = (target) => {
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i].date <= target) {
+        const base = history[i].value;
+        return Number.isFinite(base) && base > 0 ? ((latest.value / base) - 1) * 100 : null;
+      }
+    }
+    return null;
+  };
+
+  const mk = (targetIsoDate) => chainFrom(clampTarget(targetIsoDate)) ?? fallbackValueReturn(targetIsoDate);
   return {
-    h24: mk(lookup(toISODate(d24))),
-    ytd: mk(lookup(ytdStart)),
-    m6: mk(lookup(toISODate(d6m))),
-    y1: mk(lookup(toISODate(d1y))),
+    h24: mk(toISODate(d24)),
+    ytd: mk(ytdStart),
+    m6: mk(toISODate(d6m)),
+    y1: mk(toISODate(d1y)),
   };
 }
 
@@ -1029,7 +1059,7 @@ signupBtn.addEventListener("click", async () => {
 
   if (data.session?.user?.email) {
     setLoggedInUI(data.session.user.email);
-    await refreshOverviewGraph();
+    await loadPortfolioAndPerformance();
   } else {
     setStatus("Sign up successful. Check your email if confirmation is required, then log in.");
   }
@@ -1045,7 +1075,7 @@ loginBtn.addEventListener("click", async () => {
   if (error) { setStatus("Login error: " + error.message); return; }
 
   setLoggedInUI(data.user.email);
-  await refreshOverviewGraph();
+  await loadPortfolioAndPerformance();
 });
 
 logoutBtn.addEventListener("click", async () => {
@@ -1063,7 +1093,7 @@ logoutBtn.addEventListener("click", async () => {
   const session = data.session;
   if (session?.user?.email) {
     setLoggedInUI(session.user.email);
-    await refreshOverviewGraph();
+    await loadPortfolioAndPerformance();
   } else {
     setLoggedOutUI();
   }

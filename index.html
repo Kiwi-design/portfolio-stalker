@@ -70,11 +70,28 @@
     }
 
     /* Nav */
-    .nav {
+    .menu-header {
       display: flex;
+      justify-content: flex-end;
+      margin: 0 0 8px 0;
+    }
+
+    .hamburger {
+      font-size: 22px;
+      line-height: 1;
+      padding: 6px 10px;
+      background: #fff;
+    }
+
+    .nav {
+      display: none;
       gap: 10px;
       flex-wrap: wrap;
       margin: 10px 0 0 0;
+    }
+
+    .nav.open {
+      display: flex;
     }
 
     .nav button {
@@ -192,12 +209,17 @@
 
     <div id="postLoginPanel" class="post-login-layout" style="display:none;">
       <!-- Menu (hidden until logged in) -->
-      <div id="menu" class="nav" style="display:none; margin-top:0;">
+      <div>
+        <div class="menu-header">
+          <button id="menuToggle" class="hamburger" type="button" aria-label="Toggle menu" aria-expanded="false">☰</button>
+        </div>
+        <div id="menu" class="nav" style="margin-top:0;">
         <button id="tabPortfolio" class="active" type="button">Portfolio</button>
         <button id="tabPerformance" type="button">Performance</button>
         <button id="tabTransactions" type="button">Transaction</button>
         <button id="tabAddEdit" type="button">Add/Edit</button>
         <button id="tabStatistics" type="button">Statistics</button>
+        </div>
       </div>
 
       <div id="inceptionPanel" class="chart-wrap" style="display:none;">

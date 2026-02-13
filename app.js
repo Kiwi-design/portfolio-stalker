@@ -242,6 +242,15 @@ function setLoggedOutUI() {
   exitEditMode();
 }
 
+async function refreshPortfolioDailyValueOnLogin() {
+  try {
+    const { error } = await supabaseClient.rpc("refresh_portfolio_daily_value_on_login");
+    if (error) throw error;
+  } catch (e) {
+    console.warn("Daily portfolio value refresh skipped:", e.message || e);
+  }
+}
+
 async function getSessionOrThrow() {
   const { data, error } = await supabaseClient.auth.getSession();
   if (error) throw new Error(error.message);
@@ -1059,6 +1068,7 @@ signupBtn.addEventListener("click", async () => {
 
   if (data.session?.user?.email) {
     setLoggedInUI(data.session.user.email);
+    await refreshPortfolioDailyValueOnLogin();
     await loadPortfolioAndPerformance();
   } else {
     setStatus("Sign up successful. Check your email if confirmation is required, then log in.");
@@ -1075,6 +1085,7 @@ loginBtn.addEventListener("click", async () => {
   if (error) { setStatus("Login error: " + error.message); return; }
 
   setLoggedInUI(data.user.email);
+  await refreshPortfolioDailyValueOnLogin();
   await loadPortfolioAndPerformance();
 });
 
@@ -1093,6 +1104,7 @@ logoutBtn.addEventListener("click", async () => {
   const session = data.session;
   if (session?.user?.email) {
     setLoggedInUI(session.user.email);
+    await refreshPortfolioDailyValueOnLogin();
     await loadPortfolioAndPerformance();
   } else {
     setLoggedOutUI();

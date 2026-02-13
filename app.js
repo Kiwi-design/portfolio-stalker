@@ -9,10 +9,12 @@ const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const emailEl = document.getElementById("email");
 const passwordEl = document.getElementById("password");
 const statusEl = document.getElementById("status");
+const authPanelEl = document.getElementById("authPanel");
 const signupBtn = document.getElementById("signup");
 const loginBtn = document.getElementById("login");
 const logoutBtn = document.getElementById("logout");
 const postLoginPanel = document.getElementById("postLoginPanel");
+const loggedInHintEl = document.getElementById("loggedInHint");
 const inceptionPanel = document.getElementById("inceptionPanel");
 const topPerfMetricsEl = document.getElementById("topPerfMetrics");
 const inceptionChartEl = document.getElementById("inceptionChart");
@@ -28,6 +30,7 @@ const tabPerformance = document.getElementById("tabPerformance");
 const tabTransactions = document.getElementById("tabTransactions");
 const tabAddEdit = document.getElementById("tabAddEdit");
 const tabStatistics = document.getElementById("tabStatistics");
+const menuLogoutBtn = document.getElementById("menuLogout");
 
 const sectionPortfolio = document.getElementById("sectionPortfolio");
 const sectionPerformance = document.getElementById("sectionPerformance");
@@ -100,6 +103,13 @@ function setMenuOpen(isOpen) {
   menuToggleBtn.setAttribute("aria-expanded", String(isOpen));
 }
 
+async function doLogout() {
+  setStatus("Logging out...");
+  const { error } = await supabaseClient.auth.signOut();
+  if (error) { setStatus("Logout error: " + error.message); return; }
+  setLoggedOutUI();
+}
+
 async function refreshOverviewGraph() {
   try {
     const { history } = await buildPortfolioHistory();
@@ -141,9 +151,23 @@ tabStatistics.addEventListener("click", () => {
   setMenuOpen(false);
 });
 
-menuToggleBtn.addEventListener("click", () => {
+menuToggleBtn.addEventListener("click", (event) => {
+  event.stopPropagation();
   const isOpen = !menuEl.classList.contains("open");
   setMenuOpen(isOpen);
+});
+
+menuEl.addEventListener("click", (event) => {
+  event.stopPropagation();
+});
+
+document.addEventListener("click", () => {
+  if (menuEl.classList.contains("open")) setMenuOpen(false);
+});
+
+menuLogoutBtn.addEventListener("click", async () => {
+  setMenuOpen(false);
+  await doLogout();
 });
 
 function enterEditMode(tx) {
@@ -172,21 +196,23 @@ function exitEditMode() {
 cancelEditBtn.addEventListener("click", () => exitEditMode());
 
 function setLoggedInUI(email) {
+  authPanelEl.classList.add("hidden");
   signupBtn.style.display = "none";
   loginBtn.style.display = "none";
-  logoutBtn.style.display = "inline-block";
+  logoutBtn.style.display = "none";
 
   postLoginPanel.style.display = "grid";
   inceptionPanel.style.display = "block";
   appBox.style.display = "none";
   setMenuOpen(false);
 
-  setStatus(
-    `Logged in as: ${email}\nUse the menu to open a section.`
-  );
+  loggedInHintEl.textContent = `Logged in as: ${email}
+Use the menu to open a section.`;
+  setStatus("");
 }
 
 function setLoggedOutUI() {
+  authPanelEl.classList.remove("hidden");
   signupBtn.style.display = "inline-block";
   loginBtn.style.display = "inline-block";
   logoutBtn.style.display = "none";
@@ -196,6 +222,7 @@ function setLoggedOutUI() {
   appBox.style.display = "none";
   setMenuOpen(false);
 
+  loggedInHintEl.textContent = "";
   setStatus("Not logged in.");
   setTxStatus("");
   setAddEditStatus("");
@@ -508,18 +535,55 @@ function drawInceptionChart(history) {
     inceptionChartCaptionEl.textContent = "Not enough data for chart yet.";
     return;
   }
+
+  const width = 600;
+  const height = 180;
+  const margin = { top: 10, right: 12, bottom: 28, left: 58 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+
   const values = history.map((h) => h.value);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = Math.max(max - min, 1e-9);
-  const points = history.map((h, i) => {
-    const x = (i / Math.max(history.length - 1, 1)) * 600;
-    const y = 170 - ((h.value - min) / span) * 150;
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(" ");
+  const minVal = Math.min(...values);
+  const maxVal = Math.max(...values);
+  const pad = Math.max((maxVal - minVal) * 0.06, 1);
+  const yMin = Math.max(0, minVal - pad);
+  const yMax = maxVal + pad;
+  const ySpan = Math.max(yMax - yMin, 1);
+
+  const xFor = (idx) => margin.left + (idx / Math.max(history.length - 1, 1)) * innerW;
+  const yFor = (v) => margin.top + (1 - ((v - yMin) / ySpan)) * innerH;
+
+  const points = history.map((h, i) => `${xFor(i).toFixed(2)},${yFor(h.value).toFixed(2)}`).join(" ");
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((t) => yMin + (ySpan * t));
+  const yTickEls = yTicks.map((v) => {
+    const y = yFor(v);
+    return `<line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" stroke="#eee" />
+      <text x="${margin.left - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="#666">${fmtNum(v, 0)}</text>`;
+  }).join("\n");
+
+  const seenMonths = new Set();
+  const monthTicks = [];
+  for (let i = 0; i < history.length; i += 1) {
+    const d = new Date(`${history[i].date}T00:00:00Z`);
+    const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
+    if (!seenMonths.has(key)) {
+      seenMonths.add(key);
+      monthTicks.push({ idx: i, label: d.toLocaleString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" }) });
+    }
+  }
+
+  const xTickEls = monthTicks.map((m) => {
+    const x = xFor(m.idx);
+    return `<line x1="${x}" y1="${height - margin.bottom}" x2="${x}" y2="${height - margin.bottom + 4}" stroke="#aaa" />
+      <text x="${x}" y="${height - 4}" text-anchor="middle" font-size="10" fill="#666">${m.label}</text>`;
+  }).join("\n");
 
   inceptionChartEl.innerHTML = `
-    <line x1="0" y1="170" x2="600" y2="170" stroke="#ddd" />
+    <line x1="${margin.left}" y1="${height - margin.bottom}" x2="${width - margin.right}" y2="${height - margin.bottom}" stroke="#bbb" />
+    <line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${height - margin.bottom}" stroke="#bbb" />
+    ${yTickEls}
+    ${xTickEls}
     <polyline points="${points}" fill="none" stroke="#111" stroke-width="2" />
   `;
   inceptionChartCaptionEl.textContent = `Since inception: ${history[0].date} → ${history[history.length - 1].date}`;
@@ -621,7 +685,9 @@ async function persistStatistics(stats) {
     metric_unit: s.unit,
   }));
 
-  const { error } = await supabaseClient.from("portfolio_statistics_history").insert(rows);
+  const { error } = await supabaseClient
+    .from("portfolio_statistics_history")
+    .upsert(rows, { onConflict: "user_id,as_of_date,metric_key" });
   if (error) {
     setStatsStatus(`Stats computed, but storing history failed: ${error.message}`);
   }
@@ -664,7 +730,12 @@ function renderStatistics(stats, historyRows) {
   for (const s of stats) {
     const byDate = map.get(s.key) || new Map();
     const todayValue = byDate.get(today) ?? s.value;
-    const prevValue = byDate.get(prevFri);
+    const prevValue = byDate.get(prevFri) ?? (() => {
+      const prevCandidates = [...byDate.entries()]
+        .filter(([d]) => d <= prevFri)
+        .sort((a, b) => a[0].localeCompare(b[0]));
+      return prevCandidates.length ? prevCandidates.at(-1)[1] : null;
+    })();
     const digits = s.unit === "return²" ? 6 : 2;
     html += `
       <tr>
@@ -685,7 +756,7 @@ function renderStatistics(stats, historyRows) {
       • Maximum drawdown: minimum value of (Portfolio Value / Running Peak - 1).<br/>
       • Variance (1 year): sample variance of daily portfolio returns over the last 252 observations.<br/>
       • STD (1 year): square root of the 1-year variance.<br/>
-      • 3M/6M 95% VaR: historical-simulation loss quantile (95th percentile) of rolling 3-month (63 days) and 6-month (126 days) returns.<br/>
+      • 3M/6M 95% VaR (%): historical-simulation loss quantile (95th percentile) of rolling 3-month (63 days) and 6-month (126 days) returns.<br/>
       • 3M/6M 95% CVaR (EUR): average tail loss beyond VaR converted into EUR using current portfolio value.
     </div>
   `;
@@ -978,10 +1049,7 @@ loginBtn.addEventListener("click", async () => {
 });
 
 logoutBtn.addEventListener("click", async () => {
-  setStatus("Logging out...");
-  const { error } = await supabaseClient.auth.signOut();
-  if (error) { setStatus("Logout error: " + error.message); return; }
-  setLoggedOutUI();
+  await doLogout();
 });
 
 /* ---------- Init ---------- */

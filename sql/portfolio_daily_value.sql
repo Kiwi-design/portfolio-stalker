@@ -179,6 +179,9 @@ begin
       from public.prices_daily pd
       where upper(trim(pd.symbol)) = h.symbol
         and pd.date <= h.valuation_date
+        -- Never value historical rows with synthetic anchors copied from
+        -- a later date (can otherwise leak current prices into the past).
+        and coalesce(pd.source, '') <> 'synthetic_anchor'
       order by pd.date desc
       limit 1
     ) p on true

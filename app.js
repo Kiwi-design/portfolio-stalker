@@ -417,128 +417,24 @@ function previousFriday(fromDate = new Date()) {
 }
 
 async function buildPortfolioHistory() {
-  const { data: txRows, error: txErr } = await supabaseClient
-    .from("transactions")
-    .select("symbol, side, quantity, price, txn_date")
-    .order("txn_date", { ascending: true });
+  const session = await getSessionOrThrow();
+  const { data, error } = await supabaseClient
+    .from("portfolio_daily_value")
+    .select("valuation_date, portfolio_value_eur")
+    .eq("user_id", session.user.id)
+    .order("valuation_date", { ascending: true });
 
-  if (txErr) throw new Error(`Transactions error: ${txErr.message}`);
-  if (!txRows?.length) return { history: [], dailyReturns: [] };
+  if (error) throw new Error(`portfolio_daily_value error: ${error.message}`);
 
-  const symbols = [...new Set(txRows.map((r) => String(r.symbol || "").trim().toUpperCase()).filter(Boolean))];
-  const startDate = txRows[0].txn_date;
-  const today = new Date().toISOString().slice(0, 10);
+  const cleaned = (data || [])
+    .map((row) => ({ date: row.valuation_date, value: Number(row.portfolio_value_eur) }))
+    .filter((h) => Number.isFinite(h.value) && h.value > 0);
 
-  const { data: priceRows, error: priceErr } = await supabaseClient
-    .from("prices_daily")
-    .select("symbol, date, close_native, currency")
-    .in("symbol", symbols)
-    .gte("date", startDate)
-    .lte("date", today)
-    .order("date", { ascending: true });
-
-  if (priceErr) throw new Error(`prices_daily error: ${priceErr.message}`);
-
-  const currencies = [...new Set((priceRows || []).map((r) => r.currency).filter((c) => c && c !== "EUR"))];
-  let fxRows = [];
-  if (currencies.length) {
-    const { data, error } = await supabaseClient
-      .from("fx_daily")
-      .select("ccy, date, eur_to_ccy")
-      .in("ccy", currencies)
-      .gte("date", startDate)
-      .lte("date", today)
-      .order("date", { ascending: true });
-    if (error) throw new Error(`fx_daily error: ${error.message}`);
-    fxRows = data || [];
-  }
-
-  const txByDate = new Map();
-  const netFlowByDate = new Map();
-  for (const tx of txRows) {
-    const d = tx.txn_date;
-    if (!txByDate.has(d)) txByDate.set(d, []);
-    const quantity = Number(tx.quantity);
-    const priceEur = Number(tx.price);
-    const signedCash = tx.side === "BUY" ? (quantity * priceEur) : (-quantity * priceEur);
-    netFlowByDate.set(d, (netFlowByDate.get(d) || 0) + (Number.isFinite(signedCash) ? signedCash : 0));
-    txByDate.get(d).push({
-      symbol: tx.symbol.toUpperCase(),
-      side: tx.side,
-      quantity,
-    });
-  }
-
-  const pxBySymbol = new Map();
-  const datesSet = new Set([startDate, today]);
-  for (const p of priceRows || []) {
-    const sym = p.symbol.toUpperCase();
-    if (!pxBySymbol.has(sym)) pxBySymbol.set(sym, []);
-    pxBySymbol.get(sym).push({ date: p.date, close: Number(p.close_native), ccy: p.currency });
-    datesSet.add(p.date);
-  }
-  for (const d of txByDate.keys()) datesSet.add(d);
-
-  const fxByCcy = new Map();
-  for (const fx of fxRows) {
-    const ccy = fx.ccy;
-    if (!fxByCcy.has(ccy)) fxByCcy.set(ccy, []);
-    fxByCcy.get(ccy).push({ date: fx.date, eur_to_ccy: Number(fx.eur_to_ccy) });
-  }
-
-  const sortedDates = [...datesSet].sort();
-  const holdings = new Map();
-  const pxPtr = new Map();
-  const fxPtr = new Map();
-  const lastPrice = new Map();
-  const lastFx = new Map();
-  const history = [];
-
-  for (const d of sortedDates) {
-    for (const [sym, series] of pxBySymbol.entries()) {
-      let ptr = pxPtr.get(sym) || 0;
-      while (ptr < series.length && series[ptr].date <= d) {
-        lastPrice.set(sym, series[ptr]);
-        ptr += 1;
-      }
-      pxPtr.set(sym, ptr);
-    }
-
-    for (const [ccy, series] of fxByCcy.entries()) {
-      let ptr = fxPtr.get(ccy) || 0;
-      while (ptr < series.length && series[ptr].date <= d) {
-        lastFx.set(ccy, series[ptr].eur_to_ccy);
-        ptr += 1;
-      }
-      fxPtr.set(ccy, ptr);
-    }
-
-    for (const tx of txByDate.get(d) || []) {
-      const curr = holdings.get(tx.symbol) || 0;
-      const delta = tx.side === "BUY" ? tx.quantity : -tx.quantity;
-      holdings.set(tx.symbol, curr + delta);
-    }
-
-    let valueEur = 0;
-    for (const [sym, qty] of holdings.entries()) {
-      if (!Number.isFinite(qty) || qty <= 0) continue;
-      const px = lastPrice.get(sym);
-      if (!px || !Number.isFinite(px.close)) continue;
-      const ccy = px.ccy;
-      const fx = ccy === "EUR" ? 1 : (lastFx.get(ccy) ? 1 / lastFx.get(ccy) : null);
-      if (!Number.isFinite(fx)) continue;
-      valueEur += qty * px.close * fx;
-    }
-    history.push({ date: d, value: valueEur });
-  }
-
-  const cleaned = history.filter((h) => Number.isFinite(h.value) && h.value > 0);
   const dailyReturns = [];
   for (let i = 1; i < cleaned.length; i += 1) {
     const prev = cleaned[i - 1].value;
     const cur = cleaned[i].value;
-    const netFlow = Number(netFlowByDate.get(cleaned[i].date) || 0);
-    if (prev > 0) dailyReturns.push({ date: cleaned[i].date, r: (cur - prev - netFlow) / prev });
+    if (prev > 0) dailyReturns.push({ date: cleaned[i].date, r: (cur - prev) / prev });
   }
 
   return { history: cleaned, dailyReturns };
@@ -552,7 +448,7 @@ function drawInceptionChart(history) {
   }
 
   const width = 600;
-  const height = 240;
+  const height = 320;
   const margin = { top: 12, right: 12, bottom: 40, left: 74 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
@@ -565,10 +461,16 @@ function drawInceptionChart(history) {
   const yMax = maxVal + pad;
   const ySpan = Math.max(yMax - yMin, 1);
 
-  const xFor = (idx) => margin.left + (idx / Math.max(history.length - 1, 1)) * innerW;
+  const firstTs = Date.parse(`${history[0].date}T00:00:00Z`);
+  const lastTs = Date.parse(`${history[history.length - 1].date}T00:00:00Z`);
+  const xSpan = Math.max(lastTs - firstTs, 1);
+  const xFor = (isoDate) => {
+    const ts = Date.parse(`${isoDate}T00:00:00Z`);
+    return margin.left + ((ts - firstTs) / xSpan) * innerW;
+  };
   const yFor = (v) => margin.top + (1 - ((v - yMin) / ySpan)) * innerH;
 
-  const points = history.map((h, i) => `${xFor(i).toFixed(2)},${yFor(h.value).toFixed(2)}`).join(" ");
+  const points = history.map((h) => `${xFor(h.date).toFixed(2)},${yFor(h.value).toFixed(2)}`).join(" ");
 
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map((t) => yMin + (ySpan * t));
   const yTickEls = yTicks.map((v) => {
@@ -577,28 +479,21 @@ function drawInceptionChart(history) {
       <text x="${margin.left - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="#666">${fmtNum(v, 0)}</text>`;
   }).join("\n");
 
-  const seenMonths = new Set();
+  const startMonth = new Date(`${history[0].date}T00:00:00Z`);
+  const endMonth = new Date(`${history[history.length - 1].date}T00:00:00Z`);
   const monthTicks = [];
-  for (let i = 0; i < history.length; i += 1) {
-    const d = new Date(`${history[i].date}T00:00:00Z`);
-    const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}`;
-    if (!seenMonths.has(key)) {
-      seenMonths.add(key);
-      monthTicks.push({ idx: i, label: d.toLocaleString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" }) });
-    }
+  const tickDate = new Date(Date.UTC(startMonth.getUTCFullYear(), startMonth.getUTCMonth(), 1));
+  while (tickDate <= endMonth) {
+    monthTicks.push(new Date(tickDate));
+    tickDate.setUTCMonth(tickDate.getUTCMonth() + 2);
   }
 
-  const minTickSpacing = 56;
-  const filteredMonthTicks = monthTicks.filter((m, idx) => {
-    if (idx === 0 || idx === monthTicks.length - 1) return true;
-    const prev = monthTicks[idx - 1];
-    return (xFor(m.idx) - xFor(prev.idx)) >= minTickSpacing;
-  });
-
-  const xTickEls = filteredMonthTicks.map((m) => {
-    const x = xFor(m.idx);
+  const xTickEls = monthTicks.map((d) => {
+    const isoDate = toISODate(d);
+    const x = xFor(isoDate);
+    const label = d.toLocaleString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" });
     return `<line x1="${x}" y1="${height - margin.bottom}" x2="${x}" y2="${height - margin.bottom + 4}" stroke="#aaa" />
-      <text x="${x}" y="${height - 8}" text-anchor="middle" font-size="10" fill="#666">${m.label}</text>`;
+      <text x="${x}" y="${height - 8}" text-anchor="middle" font-size="10" fill="#666">${label}</text>`;
   }).join("\n");
 
   inceptionChartEl.innerHTML = `
@@ -614,18 +509,15 @@ function drawInceptionChart(history) {
 function computeToplineReturns(history, dailyReturns) {
   if (!history.length) return { h24: null, ytd: null, m6: null, y1: null };
   const latest = history[history.length - 1];
-  const chainFrom = (targetDate) => {
-    const series = (dailyReturns || []).filter((row) => row.date > targetDate && Number.isFinite(row.r));
-    if (!series.length) return null;
-    let acc = 1;
-    for (const row of series) acc *= (1 + row.r);
-    return (acc - 1) * 100;
-  };
 
-  const firstDate = history[0].date;
-  const clampTarget = (isoDate) => {
-    if (isoDate < firstDate) return firstDate;
-    return isoDate;
+  const simpleReturnFrom = (targetDate) => {
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i].date <= targetDate) {
+        const base = history[i].value;
+        return Number.isFinite(base) && base > 0 ? ((latest.value / base) - 1) * 100 : null;
+      }
+    }
+    return null;
   };
 
   const latestDate = new Date(`${latest.date}T00:00:00Z`);
@@ -634,17 +526,7 @@ function computeToplineReturns(history, dailyReturns) {
   const d1y = new Date(latestDate); d1y.setUTCFullYear(d1y.getUTCFullYear() - 1);
   const ytdStart = `${latestDate.getUTCFullYear()}-01-01`;
 
-  const fallbackValueReturn = (target) => {
-    for (let i = history.length - 1; i >= 0; i -= 1) {
-      if (history[i].date <= target) {
-        const base = history[i].value;
-        return Number.isFinite(base) && base > 0 ? ((latest.value / base) - 1) * 100 : null;
-      }
-    }
-    return null;
-  };
-
-  const mk = (targetIsoDate) => chainFrom(clampTarget(targetIsoDate)) ?? fallbackValueReturn(targetIsoDate);
+  const mk = (targetIsoDate) => simpleReturnFrom(targetIsoDate);
   return {
     h24: mk(toISODate(d24)),
     ytd: mk(ytdStart),
@@ -890,68 +772,168 @@ function renderPortfolioTable(results) {
 function renderPerformance(payload) {
   const perf = payload.performance || [];
   const totals = payload.performance_totals || {};
+
+  let html = "";
   if (!perf.length) {
-    perfOutputEl.innerHTML = "<p>No positions to calculate performance.</p>";
+    html += "<p>No positions to calculate performance.</p>";
+  } else {
+    html += `
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th class="num">Quantity</th>
+              <th class="num">Avg Cost (native)</th>
+              <th class="num">Avg Sold (native)</th>
+              <th class="num">Current (native)</th>
+              <th>Currency</th>
+              <th class="num">Unrealized (EUR)</th>
+              <th class="num">Percentage</th>
+              <th class="num">Realized (EUR)</th>
+              <th class="num">Percentage</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+
+    for (const r of perf) {
+      const isClosed = Math.abs(Number(r.quantity ?? 0)) <= 1e-12;
+      html += `
+        <tr${isClosed ? ' style="background:#ffecec;"' : ''}>
+          <td>${r.name || ""}</td>
+          <td class="num">${Number(r.quantity).toFixed(4)}</td>
+          <td class="num">${Number(r.avg_cost ?? 0).toFixed(4)}</td>
+          <td class="num">${Number(r.avg_sold ?? 0).toFixed(4)}</td>
+          <td class="num">${Number(r.current_price ?? 0).toFixed(4)}</td>
+          <td>${r.currency || ""}</td>
+          <td class="num">${Number(r.unrealized_eur ?? 0).toFixed(2)}</td>
+          <td class="num">${Number(r.percent_unrealized ?? 0).toFixed(2)}%</td>
+          <td class="num">${Number(r.realized_eur ?? 0).toFixed(2)}</td>
+          <td class="num">${Number(r.percent_realized ?? 0).toFixed(2)}%</td>
+        </tr>
+      `;
+    }
+
+    html += `
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">Totals</td>
+              <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_unrealized_eur ?? 0).toFixed(2)}</td>
+              <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_percent ?? 0).toFixed(2)}%</td>
+              <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_realized_eur ?? 0).toFixed(2)}</td>
+              <td class="num" style="font-weight:700; border-top:2px solid #ccc;">-</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div class="muted" style="margin-top:8px;">
+        Total % is portfolio-weighted: total_unrealized_eur / total_cost_basis_eur.
+      </div>
+    `;
+  }
+
+  html += '<div id="twrDailyTable" style="margin-top:14px;"></div>';
+  perfOutputEl.innerHTML = html;
+}
+
+
+async function computeDailyTwrSeries(history) {
+  if (!history.length) return [];
+
+  const session = await getSessionOrThrow();
+  const { data: txRows, error } = await supabaseClient
+    .from("transactions")
+    .select("txn_date, side, quantity, price")
+    .eq("user_id", session.user.id)
+    .order("txn_date", { ascending: true });
+
+  if (error) throw new Error(`Transactions error: ${error.message}`);
+
+  const netFlowByDate = new Map();
+  for (const tx of txRows || []) {
+    const quantity = Number(tx.quantity);
+    const priceEur = Number(tx.price);
+    if (!Number.isFinite(quantity) || !Number.isFinite(priceEur)) continue;
+    const flow = tx.side === "BUY" ? (quantity * priceEur) : (-quantity * priceEur);
+    netFlowByDate.set(tx.txn_date, (netFlowByDate.get(tx.txn_date) || 0) + flow);
+  }
+
+  const out = [];
+  let cumulative = 1;
+  for (let i = 1; i < history.length; i += 1) {
+    const prev = history[i - 1];
+    const cur = history[i];
+    const flow = Number(netFlowByDate.get(cur.date) || 0);
+    if (!(prev.value > 0)) continue;
+
+    const largeCashFlow = Math.abs(flow) >= (0.15 * prev.value);
+    const r = ((cur.value - flow) / prev.value) - 1;
+    cumulative *= (1 + r);
+
+    out.push({
+      date: cur.date,
+      marketValueEur: cur.value,
+      netExternalFlowEur: flow,
+      largeCashFlow,
+      dailyPct: r * 100,
+      cumulativePct: (cumulative - 1) * 100,
+    });
+  }
+
+  return out;
+}
+
+function renderDailyTwrTable(rows) {
+  const host = document.getElementById("twrDailyTable");
+  if (!host) return;
+
+  if (!rows.length) {
+    host.innerHTML = '<p class="muted">No daily TWR history yet.</p>';
     return;
   }
 
   let html = `
+    <h3 style="margin:0 0 8px 0;">Daily Time-Weighted Return (large cash flow policy: 15%)</h3>
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>Name</th>
-            <th class="num">Quantity</th>
-            <th class="num">Avg Cost (native)</th>
-            <th class="num">Avg Sold (native)</th>
-            <th class="num">Current (native)</th>
-            <th>Currency</th>
-            <th class="num">Unrealized (EUR)</th>
-            <th class="num">Percentage</th>
-            <th class="num">Realized (EUR)</th>
-            <th class="num">Percentage</th>
+            <th>Date</th>
+            <th class="num">Portfolio value (EUR)</th>
+            <th class="num">Net external flow (EUR)</th>
+            <th>Large cash flow (≥15%)</th>
+            <th class="num">Daily TWR %</th>
+            <th class="num">Cumulated TWR %</th>
           </tr>
         </thead>
         <tbody>
   `;
 
-  for (const r of perf) {
-    const isClosed = Math.abs(Number(r.quantity ?? 0)) <= 1e-12;
+  for (const row of rows) {
     html += `
-      <tr${isClosed ? ' style="background:#ffecec;"' : ''}>
-        <td>${r.name || ""}</td>
-        <td class="num">${Number(r.quantity).toFixed(4)}</td>
-        <td class="num">${Number(r.avg_cost ?? 0).toFixed(4)}</td>
-        <td class="num">${Number(r.avg_sold ?? 0).toFixed(4)}</td>
-        <td class="num">${Number(r.current_price ?? 0).toFixed(4)}</td>
-        <td>${r.currency || ""}</td>
-        <td class="num">${Number(r.unrealized_eur ?? 0).toFixed(2)}</td>
-        <td class="num">${Number(r.percent_unrealized ?? 0).toFixed(2)}%</td>
-        <td class="num">${Number(r.realized_eur ?? 0).toFixed(2)}</td>
-        <td class="num">${Number(r.percent_realized ?? 0).toFixed(2)}%</td>
+      <tr>
+        <td>${row.date}</td>
+        <td class="num">${fmtNum(row.marketValueEur, 2)}</td>
+        <td class="num">${fmtNum(row.netExternalFlowEur, 2)}</td>
+        <td>${row.largeCashFlow ? "Yes" : "No"}</td>
+        <td class="num">${fmtPct(row.dailyPct)}</td>
+        <td class="num">${fmtPct(row.cumulativePct)}</td>
       </tr>
     `;
   }
 
   html += `
         </tbody>
-        <tfoot>
-          <tr>
-            <td colspan="6" class="num" style="font-weight:700; border-top:2px solid #ccc;">Totals</td>
-            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_unrealized_eur ?? 0).toFixed(2)}</td>
-            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_percent ?? 0).toFixed(2)}%</td>
-            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">${Number(totals.total_realized_eur ?? 0).toFixed(2)}</td>
-            <td class="num" style="font-weight:700; border-top:2px solid #ccc;">-</td>
-          </tr>
-        </tfoot>
       </table>
     </div>
     <div class="muted" style="margin-top:8px;">
-      Total % is portfolio-weighted: total_unrealized_eur / total_cost_basis_eur.
+      Formula: daily TWR = ((V_t - CF_t) / V_{t-1}) - 1, where CF_t is net BUY/SELL cash flow in EUR.
     </div>
   `;
 
-  perfOutputEl.innerHTML = html;
+  host.innerHTML = html;
 }
 
 async function loadPortfolioAndPerformance() {
@@ -984,6 +966,10 @@ async function loadPortfolioAndPerformance() {
     renderPerformance(data);
 
     await refreshOverviewGraph();
+
+    const { history } = await buildPortfolioHistory();
+    const twrRows = await computeDailyTwrSeries(history);
+    renderDailyTwrTable(twrRows);
 
   } catch (e) {
     const msg = "Fetch failed:\n" + e.message;

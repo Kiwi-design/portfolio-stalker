@@ -15,10 +15,6 @@ const loginBtn = document.getElementById("login");
 const logoutBtn = document.getElementById("logout");
 const postLoginPanel = document.getElementById("postLoginPanel");
 const loggedInHintEl = document.getElementById("loggedInHint");
-const inceptionPanel = document.getElementById("inceptionPanel");
-const topPerfMetricsEl = document.getElementById("topPerfMetrics");
-const inceptionChartEl = document.getElementById("inceptionChart");
-const inceptionChartCaptionEl = document.getElementById("inceptionChartCaption");
 
 // Menu + Sections
 const menuEl = document.getElementById("menu");
@@ -110,18 +106,6 @@ async function doLogout() {
   setLoggedOutUI();
 }
 
-async function refreshOverviewGraph() {
-  try {
-    const { history, dailyReturns } = await buildPortfolioHistory();
-    renderToplineMetrics(computeToplineReturns(history, dailyReturns));
-    drawInceptionChart(history);
-  } catch (e) {
-    topPerfMetricsEl.textContent = "";
-    inceptionChartEl.innerHTML = "";
-    inceptionChartCaptionEl.textContent = `Chart error: ${e.message}`;
-  }
-}
-
 tabPortfolio.addEventListener("click", async () => {
   appBox.style.display = "block";
   setActiveTab("portfolio");
@@ -202,7 +186,6 @@ function setLoggedInUI(email) {
   logoutBtn.style.display = "none";
 
   postLoginPanel.style.display = "grid";
-  inceptionPanel.style.display = "block";
   appBox.style.display = "none";
   setMenuOpen(false);
 
@@ -218,7 +201,6 @@ function setLoggedOutUI() {
   logoutBtn.style.display = "none";
 
   postLoginPanel.style.display = "none";
-  inceptionPanel.style.display = "none";
   appBox.style.display = "none";
   setMenuOpen(false);
 
@@ -234,9 +216,6 @@ function setLoggedOutUI() {
   portfolioOutputEl.innerHTML = "";
   perfOutputEl.innerHTML = "";
   statsOutputEl.innerHTML = "";
-  topPerfMetricsEl.textContent = "";
-  inceptionChartEl.innerHTML = "";
-  inceptionChartCaptionEl.textContent = "";
   lastPortfolioPayload = null;
 
   exitEditMode();
@@ -438,110 +417,6 @@ async function buildPortfolioHistory() {
   }
 
   return { history: cleaned, dailyReturns };
-}
-
-function drawInceptionChart(history) {
-  if (!history.length) {
-    inceptionChartEl.innerHTML = "";
-    inceptionChartCaptionEl.textContent = "Not enough data for chart yet.";
-    return;
-  }
-
-  const width = 600;
-  const height = 320;
-  const margin = { top: 12, right: 12, bottom: 40, left: 74 };
-  const innerW = width - margin.left - margin.right;
-  const innerH = height - margin.top - margin.bottom;
-
-  const values = history.map((h) => h.value);
-  const minVal = Math.min(...values);
-  const maxVal = Math.max(...values);
-  const pad = Math.max((maxVal - minVal) * 0.06, 1);
-  const yMin = Math.max(0, minVal - pad);
-  const yMax = maxVal + pad;
-  const ySpan = Math.max(yMax - yMin, 1);
-
-  const firstTs = Date.parse(`${history[0].date}T00:00:00Z`);
-  const lastTs = Date.parse(`${history[history.length - 1].date}T00:00:00Z`);
-  const xSpan = Math.max(lastTs - firstTs, 1);
-  const xFor = (isoDate) => {
-    const ts = Date.parse(`${isoDate}T00:00:00Z`);
-    return margin.left + ((ts - firstTs) / xSpan) * innerW;
-  };
-  const yFor = (v) => margin.top + (1 - ((v - yMin) / ySpan)) * innerH;
-
-  const points = history.map((h) => `${xFor(h.date).toFixed(2)},${yFor(h.value).toFixed(2)}`).join(" ");
-
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((t) => yMin + (ySpan * t));
-  const yTickEls = yTicks.map((v) => {
-    const y = yFor(v);
-    return `<line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" stroke="#eee" />
-      <text x="${margin.left - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="#666">${fmtNum(v, 0)}</text>`;
-  }).join("\n");
-
-  const startMonth = new Date(`${history[0].date}T00:00:00Z`);
-  const endMonth = new Date(`${history[history.length - 1].date}T00:00:00Z`);
-  const monthTicks = [];
-  const tickDate = new Date(Date.UTC(startMonth.getUTCFullYear(), startMonth.getUTCMonth(), 1));
-  while (tickDate <= endMonth) {
-    monthTicks.push(new Date(tickDate));
-    tickDate.setUTCMonth(tickDate.getUTCMonth() + 2);
-  }
-
-  const xTickEls = monthTicks.map((d) => {
-    const isoDate = toISODate(d);
-    const x = xFor(isoDate);
-    const label = d.toLocaleString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" });
-    return `<line x1="${x}" y1="${height - margin.bottom}" x2="${x}" y2="${height - margin.bottom + 4}" stroke="#aaa" />
-      <text x="${x}" y="${height - 8}" text-anchor="middle" font-size="10" fill="#666">${label}</text>`;
-  }).join("\n");
-
-  inceptionChartEl.innerHTML = `
-    <line x1="${margin.left}" y1="${height - margin.bottom}" x2="${width - margin.right}" y2="${height - margin.bottom}" stroke="#bbb" />
-    <line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${height - margin.bottom}" stroke="#bbb" />
-    ${yTickEls}
-    ${xTickEls}
-    <polyline points="${points}" fill="none" stroke="#111" stroke-width="2" />
-  `;
-  inceptionChartCaptionEl.textContent = `Since inception: ${history[0].date} → ${history[history.length - 1].date}`;
-}
-
-function computeToplineReturns(history, dailyReturns) {
-  if (!history.length) return { h24: null, ytd: null, m6: null, y1: null };
-  const latest = history[history.length - 1];
-
-  const simpleReturnFrom = (targetDate) => {
-    for (let i = history.length - 1; i >= 0; i -= 1) {
-      if (history[i].date <= targetDate) {
-        const base = history[i].value;
-        return Number.isFinite(base) && base > 0 ? ((latest.value / base) - 1) * 100 : null;
-      }
-    }
-    return null;
-  };
-
-  const latestDate = new Date(`${latest.date}T00:00:00Z`);
-  const d24 = new Date(latestDate); d24.setUTCDate(d24.getUTCDate() - 1);
-  const d6m = new Date(latestDate); d6m.setUTCMonth(d6m.getUTCMonth() - 6);
-  const d1y = new Date(latestDate); d1y.setUTCFullYear(d1y.getUTCFullYear() - 1);
-  const ytdStart = `${latestDate.getUTCFullYear()}-01-01`;
-
-  const mk = (targetIsoDate) => simpleReturnFrom(targetIsoDate);
-  return {
-    h24: mk(toISODate(d24)),
-    ytd: mk(ytdStart),
-    m6: mk(toISODate(d6m)),
-    y1: mk(toISODate(d1y)),
-  };
-}
-
-function renderToplineMetrics(m) {
-  topPerfMetricsEl.innerHTML = `
-    <div><strong>24h:</strong> ${fmtPct(m.h24)}</div>
-    <div><strong>YTD:</strong> ${fmtPct(m.ytd)}</div>
-    <div><strong>6 months:</strong> ${fmtPct(m.m6)}</div>
-    <div><strong>1 year:</strong> ${fmtPct(m.y1)}</div>
-  `;
 }
 
 function computeStatistics(history, dailyReturns) {
@@ -964,8 +839,6 @@ async function loadPortfolioAndPerformance() {
 
     setPerfStatus("Performance loaded ✅");
     renderPerformance(data);
-
-    await refreshOverviewGraph();
 
     const { history } = await buildPortfolioHistory();
     const twrRows = await computeDailyTwrSeries(history);

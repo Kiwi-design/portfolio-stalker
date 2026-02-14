@@ -130,12 +130,12 @@ begin
     from generate_series(date_trunc('month', v_start_date), date_trunc('month', p_as_of), interval '1 month') gs
   ),
   month_end_business_dates as (
-    select max((ms.month_start + offs)::date) as valuation_date
+    select max((ms.month_start + offs.day_offset)::date) as valuation_date
     from month_starts ms
-    cross join lateral generate_series(interval '0 day', interval '31 day', interval '1 day') offs
-    where (ms.month_start + offs)::date >= ms.month_start
-      and (ms.month_start + offs)::date < (ms.month_start + interval '1 month')::date
-      and extract(isodow from (ms.month_start + offs)::date) between 1 and 5
+    cross join lateral generate_series(0, 31) as offs(day_offset)
+    where (ms.month_start + offs.day_offset)::date >= ms.month_start
+      and (ms.month_start + offs.day_offset)::date < (ms.month_start + interval '1 month')::date
+      and extract(isodow from (ms.month_start + offs.day_offset)::date) between 1 and 5
     group by ms.month_start
   ),
   valuation_dates as (

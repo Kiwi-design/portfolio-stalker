@@ -54,6 +54,7 @@ latest_prices as (
     from public.prices_daily p
     where upper(trim(p.symbol)) = h.symbol
       and p.date <= h.valuation_date
+      and coalesce(p.source, '') <> 'synthetic_anchor'
     order by p.date desc
     limit 1
   ) pd on true

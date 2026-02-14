@@ -48,7 +48,6 @@ set search_path = public
 as $$
 declare
   v_min_txn_date date;
-  v_last_saved_date date;
   v_start_date date;
 begin
   if p_user_id is null then
@@ -67,26 +66,17 @@ begin
     return;
   end if;
 
-  select max(v.valuation_date)
-    into v_last_saved_date
-  from public.portfolio_daily_value v
-  where v.user_id = p_user_id;
-
+  -- Always rebuild the full valuation timeline for the user.
+  -- This avoids stale historical rows after pricing/FX policy changes
+  -- (for example removing synthetic anchor prices from valuation).
+  -- Keep p_rebuild for API compatibility, but behavior is intentionally
+  -- equivalent for both true/false.
   if p_rebuild then
-    delete from public.portfolio_daily_value where user_id = p_user_id;
-    v_start_date := v_min_txn_date;
-  else
-    -- Recompute with a rolling lookback to keep sparse valuation dates coherent
-    -- around month boundaries and 2-business-day triggers.
-    v_start_date := coalesce(v_last_saved_date - 45, v_min_txn_date);
-    if v_start_date < v_min_txn_date then
-      v_start_date := v_min_txn_date;
-    end if;
-
-    delete from public.portfolio_daily_value
-    where user_id = p_user_id
-      and valuation_date >= v_start_date;
+    null;
   end if;
+
+  delete from public.portfolio_daily_value where user_id = p_user_id;
+  v_start_date := v_min_txn_date;
 
   if v_start_date > p_as_of then
     return;
@@ -179,6 +169,9 @@ begin
       from public.prices_daily pd
       where upper(trim(pd.symbol)) = h.symbol
         and pd.date <= h.valuation_date
+        -- Never value historical rows with synthetic anchors copied from
+        -- a later date (can otherwise leak current prices into the past).
+        and coalesce(pd.source, '') <> 'synthetic_anchor'
       order by pd.date desc
       limit 1
     ) p on true

@@ -1,4 +1,4 @@
--- Daily portfolio valuation table in EUR.
+-- Portfolio valuation table in EUR.
 -- Paste this in Supabase SQL Editor.
 
 create table if not exists public.portfolio_daily_value (
@@ -12,9 +12,30 @@ create table if not exists public.portfolio_daily_value (
 create index if not exists portfolio_daily_value_user_date_idx
   on public.portfolio_daily_value (user_id, valuation_date desc);
 
--- Recompute / backfill daily valuations for a specific user.
--- p_rebuild=false: only fills missing days + refreshes the latest day up to p_as_of.
--- p_rebuild=true: rebuilds full history for the user.
+-- Utility: add N business days (Mon-Fri) to a date.
+create or replace function public.add_business_days(p_date date, p_days int)
+returns date
+language plpgsql
+immutable
+as $$
+declare
+  v_date date := p_date;
+  v_remaining int := greatest(p_days, 0);
+begin
+  while v_remaining > 0 loop
+    v_date := v_date + 1;
+    if extract(isodow from v_date) between 1 and 5 then
+      v_remaining := v_remaining - 1;
+    end if;
+  end loop;
+  return v_date;
+end;
+$$;
+
+-- Recompute/backfill valuations for a specific user under the new policy:
+-- 1) one row on each month-end business day
+-- 2) one row 2 business days after each net quantity change date
+-- 3) value = sum((BUY qty - SELL qty) * market price) at valuation date
 create or replace function public.refresh_portfolio_daily_value(
   p_user_id uuid,
   p_as_of date default current_date,
@@ -40,8 +61,9 @@ begin
   where t.user_id = p_user_id
     and t.txn_date is not null;
 
-  -- No transactions -> nothing to build.
+  -- No transactions -> clear existing valuations and exit.
   if v_min_txn_date is null then
+    delete from public.portfolio_daily_value where user_id = p_user_id;
     return;
   end if;
 
@@ -54,12 +76,16 @@ begin
     delete from public.portfolio_daily_value where user_id = p_user_id;
     v_start_date := v_min_txn_date;
   else
-    -- Backfill missing dates and refresh latest day at login.
-    -- Example: if user skips 2 days, next login inserts those two days + today.
-    v_start_date := coalesce(v_last_saved_date, v_min_txn_date);
+    -- Recompute with a rolling lookback to keep sparse valuation dates coherent
+    -- around month boundaries and 2-business-day triggers.
+    v_start_date := coalesce(v_last_saved_date - 45, v_min_txn_date);
     if v_start_date < v_min_txn_date then
       v_start_date := v_min_txn_date;
     end if;
+
+    delete from public.portfolio_daily_value
+    where user_id = p_user_id
+      and valuation_date >= v_start_date;
   end if;
 
   if v_start_date > p_as_of then
@@ -74,42 +100,79 @@ begin
       t.quantity::numeric as quantity,
       t.txn_date::date as txn_date
     from public.transactions t
-    where t.txn_date is not null
-      and t.user_id = p_user_id
+    where t.user_id = p_user_id
+      and t.txn_date::date between v_min_txn_date and p_as_of
   ),
-  daily_calendar as (
-    select p_user_id as user_id, gs::date as valuation_date
-    from generate_series(v_start_date, p_as_of, interval '1 day') gs
+  qty_change_dates as (
+    -- Keep only days where net qty changes for at least one symbol.
+    select d.txn_date as change_date
+    from (
+      select
+        txn_date,
+        symbol,
+        sum(
+          case when side = 'BUY' then quantity
+               when side = 'SELL' then -quantity
+               else 0 end
+        ) as delta_qty
+      from tx
+      group by txn_date, symbol
+    ) d
+    group by d.txn_date
+    having bool_or(abs(d.delta_qty) > 0)
+  ),
+  trigger_dates as (
+    select public.add_business_days(q.change_date, 2) as valuation_date
+    from qty_change_dates q
+  ),
+  month_starts as (
+    select date_trunc('month', gs)::date as month_start
+    from generate_series(date_trunc('month', v_start_date), date_trunc('month', p_as_of), interval '1 month') gs
+  ),
+  month_end_business_dates as (
+    select max((ms.month_start + offs)::date) as valuation_date
+    from month_starts ms
+    cross join lateral generate_series(interval '0 day', interval '31 day', interval '1 day') offs
+    where (ms.month_start + offs)::date >= ms.month_start
+      and (ms.month_start + offs)::date < (ms.month_start + interval '1 month')::date
+      and extract(isodow from (ms.month_start + offs)::date) between 1 and 5
+    group by ms.month_start
+  ),
+  valuation_dates as (
+    select distinct valuation_date
+    from (
+      select valuation_date from trigger_dates
+      union all
+      select valuation_date from month_end_business_dates
+    ) s
+    where valuation_date between v_start_date and p_as_of
   ),
   holdings as (
     select
-      c.user_id,
-      c.valuation_date,
-      t.symbol,
+      vd.valuation_date,
+      tx.symbol,
       sum(
-        case when t.side = 'BUY' then t.quantity
-             when t.side = 'SELL' then -t.quantity
+        case when tx.side = 'BUY' then tx.quantity
+             when tx.side = 'SELL' then -tx.quantity
              else 0 end
       ) as qty
-    from daily_calendar c
-    join tx t
-      on t.txn_date <= c.valuation_date
-    group by c.user_id, c.valuation_date, t.symbol
+    from valuation_dates vd
+    join tx
+      on tx.txn_date <= vd.valuation_date
+    group by vd.valuation_date, tx.symbol
     having sum(
-      case when t.side = 'BUY' then t.quantity
-           when t.side = 'SELL' then -t.quantity
+      case when tx.side = 'BUY' then tx.quantity
+           when tx.side = 'SELL' then -tx.quantity
            else 0 end
     ) > 0
   ),
   priced_holdings as (
     select
-      h.user_id,
       h.valuation_date,
       h.symbol,
       h.qty,
       p.close_native,
-      p.currency,
-      lb.last_buy_price_eur
+      p.currency
     from holdings h
     left join lateral (
       select pd.close_native, pd.currency
@@ -119,20 +182,9 @@ begin
       order by pd.date desc
       limit 1
     ) p on true
-    left join lateral (
-      select t.price::numeric as last_buy_price_eur
-      from public.transactions t
-      where t.user_id = h.user_id
-        and upper(trim(t.symbol)) = h.symbol
-        and t.side = 'BUY'
-        and t.txn_date <= h.valuation_date
-      order by t.txn_date desc, t.created_at desc
-      limit 1
-    ) lb on true
   ),
   eur_valued as (
     select
-      ph.user_id,
       ph.valuation_date,
       case
         when ph.close_native is not null then
@@ -143,8 +195,6 @@ begin
               else null
             end
           )
-        when ph.last_buy_price_eur is not null then
-          ph.qty * ph.last_buy_price_eur
         else null
       end as value_eur
     from priced_holdings ph
@@ -156,19 +206,18 @@ begin
       order by f.date desc
       limit 1
     ) fx on ph.currency <> 'EUR'
-    where ph.close_native is not null or ph.last_buy_price_eur is not null
+    where ph.close_native is not null
   )
   insert into public.portfolio_daily_value (user_id, valuation_date, portfolio_value_eur, refreshed_at)
   select
-    c.user_id,
-    c.valuation_date,
-    coalesce(sum(e.value_eur), 0)::numeric(20, 6) as portfolio_value_eur,
+    p_user_id,
+    vd.valuation_date,
+    coalesce(sum(ev.value_eur), 0)::numeric(20, 6) as portfolio_value_eur,
     now()
-  from daily_calendar c
-  left join eur_valued e
-    on e.user_id = c.user_id
-   and e.valuation_date = c.valuation_date
-  group by c.user_id, c.valuation_date
+  from valuation_dates vd
+  left join eur_valued ev
+    on ev.valuation_date = vd.valuation_date
+  group by vd.valuation_date
   on conflict (user_id, valuation_date)
   do update set
     portfolio_value_eur = excluded.portfolio_value_eur,
@@ -200,6 +249,8 @@ $$;
 
 grant execute on function public.refresh_portfolio_daily_value_on_login(date) to authenticated;
 
--- Manual examples:
--- select public.refresh_portfolio_daily_value_on_login();
--- select public.refresh_portfolio_daily_value('<user-uuid>', current_date, true); -- full rebuild
+grant execute on function public.add_business_days(date, int) to authenticated;
+
+-- One-time reset/rebuild (manual):
+-- truncate table public.portfolio_daily_value;
+-- select public.refresh_portfolio_daily_value('<user-uuid>', current_date, true);

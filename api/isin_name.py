@@ -275,24 +275,33 @@ class handler(BaseHTTPRequestHandler):
                 f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=id,symbol,security_name",
                 supa_headers,
             )
-            symbols = sorted({normalize_isin(t.get("symbol")) for t in txs if normalize_isin(t.get("symbol"))})
+
+            missing_symbols = set()
+            for row in txs:
+                row_isin = normalize_isin(row.get("symbol"))
+                if not row_isin:
+                    continue
+                old_name = normalize_name(row.get("security_name"))
+                if not old_name or normalize_isin(old_name) == row_isin:
+                    missing_symbols.add(row_isin)
+
             resolved = {}
             updates = []
-            for symbol in symbols:
+            for symbol in sorted(missing_symbols):
                 lookup = bnp_find_url_and_name_for_isin(symbol)
                 resolved_name = normalize_name((lookup or {}).get("name"))
-                if resolved_name:
+                if resolved_name and normalize_isin(resolved_name) != symbol:
                     resolved[symbol] = resolved_name
 
             for row in txs:
                 row_isin = normalize_isin(row.get("symbol"))
                 if not row_isin:
                     continue
+                old_name = normalize_name(row.get("security_name"))
+                if old_name and normalize_isin(old_name) != row_isin:
+                    continue
                 new_name = resolved.get(row_isin)
                 if not new_name:
-                    continue
-                old_name = normalize_name(row.get("security_name"))
-                if old_name == new_name:
                     continue
                 updates.append({"id": row.get("id"), "user_id": user_id, "security_name": new_name})
 

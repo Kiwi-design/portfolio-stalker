@@ -868,9 +868,40 @@ async function loadPortfolioAndPerformance() {
 loadPortfolioBtn.addEventListener("click", loadPortfolioAndPerformance);
 refreshPerfBtn.addEventListener("click", loadPortfolioAndPerformance);
 
-async function fetchSecurityNameForISIN(symbol) {
+
+function normalizeStoredSecurityName(value, symbol) {
+  const name = String(value || "").trim();
+  if (!name) return "";
+  const normalizedSymbol = String(symbol || "").trim().toUpperCase();
+  if (name.toUpperCase() === normalizedSymbol) return "";
+  return name;
+}
+
+async function getCachedSecurityNameForISIN(user_id, symbol) {
+  const { data, error } = await supabaseClient
+    .from("transactions")
+    .select("security_name")
+    .eq("user_id", user_id)
+    .eq("symbol", symbol)
+    .not("security_name", "is", null)
+    .limit(20);
+
+  if (error) return "";
+  for (const row of (data || [])) {
+    const candidate = normalizeStoredSecurityName(row.security_name, symbol);
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
+async function fetchSecurityNameForISIN(symbol, user_id) {
   const normalized = String(symbol || "").trim().toUpperCase();
   if (!isLikelyISIN(normalized)) return normalized;
+
+  if (user_id) {
+    const cached = await getCachedSecurityNameForISIN(user_id, normalized);
+    if (cached) return cached;
+  }
 
   const session = await getSessionOrThrow();
   const token = session.access_token;
@@ -884,12 +915,13 @@ async function fetchSecurityNameForISIN(symbol) {
     throw new Error(message);
   }
 
-  const name = (data?.name || "").trim();
-  if (!name || name.toUpperCase() === normalized) {
+  const name = normalizeStoredSecurityName(data?.name, normalized);
+  if (!name) {
     throw new Error(`No security name found for ISIN ${normalized}`);
   }
   return name;
 }
+
 
 async function syncSecurityNamesForUserTransactions() {
   const session = await getSessionOrThrow();
@@ -924,7 +956,7 @@ addTxBtn.addEventListener("click", async () => {
   try {
     const session = await getSessionOrThrow();
     const user_id = session.user.id;
-    const security_name = await fetchSecurityNameForISIN(symbol);
+    const security_name = await fetchSecurityNameForISIN(symbol, user_id);
 
     let error;
 

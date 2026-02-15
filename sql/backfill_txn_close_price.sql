@@ -1,7 +1,12 @@
--- Normalize existing NULL/blank txn_close_price so UI/backfill pipeline can process consistently.
--- This script does NOT copy transaction input price into txn_close_price.
+-- Force existing transactions to be re-resolved by /api/isin_name sync.
+-- Run this once in Supabase SQL Editor, then trigger Transactions -> Refresh in the app.
 
-update transactions
-set txn_close_price = 'unavailable'
-where txn_close_price is null
-   or btrim(txn_close_price) = '';
+update public.transactions
+set txn_close_price = null
+where txn_date is not null
+  and (
+    txn_close_price is null
+    or btrim(txn_close_price) = ''
+    or lower(btrim(txn_close_price)) = 'unavailable'
+    or txn_close_price !~ '\\s[A-Z]{3}$'
+  );

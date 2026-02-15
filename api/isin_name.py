@@ -577,20 +577,6 @@ def resolve_symbol_metadata(symbol, txn_date=None):
     }
 
 
-def resolve_symbol_metadata(symbol, txn_date=None):
-    normalized = normalize_symbol(symbol)
-    if not normalized:
-        return {"name": "", "url": "", "source": "", "category": "", "txn_close_price": ""}
-    close_price = yahoo_closing_price_for_symbol_date(normalized, txn_date) if txn_date else ""
-    return {
-        "name": yahoo_symbol_name(normalized) or normalized,
-        "url": "",
-        "source": "yahoo",
-        "category": "",
-        "txn_close_price": normalize_txn_close_price(close_price),
-    }
-
-
 def to_absolute_url(path_or_url):
     value = (path_or_url or "").strip()
     if not value:
@@ -1014,24 +1000,43 @@ class handler(BaseHTTPRequestHandler):
                 if len(update_row) > 2:
                     updates.append(update_row)
 
+            applied_updates = 0
+            update_errors = []
             if updates:
-                req = Request(
-                    f"{supabase_url}/rest/v1/transactions?on_conflict=id",
-                    data=json.dumps(updates).encode("utf-8"),
-                    headers={
-                        **supa_headers,
-                        "Content-Type": "application/json",
-                        "Prefer": "resolution=merge-duplicates,return=minimal",
-                    },
-                    method="POST",
-                )
-                with urlopen(req, timeout=30):
-                    pass
+                # Apply row-by-row so a single malformed record does not fail whole sync.
+                for row in updates:
+                    row_id = row.get("id")
+                    if row_id is None:
+                        continue
+                    payload = dict(row)
+                    payload.pop("id", None)
+                    if not payload:
+                        continue
+                    req = Request(
+                        f"{supabase_url}/rest/v1/transactions?id=eq.{quote_plus(str(row_id))}",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={
+                            **supa_headers,
+                            "Content-Type": "application/json",
+                            "Prefer": "return=minimal",
+                        },
+                        method="PATCH",
+                    )
+                    try:
+                        with urlopen(req, timeout=30):
+                            applied_updates += 1
+                    except Exception as e:
+                        if len(update_errors) < 10:
+                            update_errors.append(f"id={row_id}: {e}")
 
-            self._send(200, {
+            response = {
                 "status": "ok",
-                "updated_rows": len(updates),
+                "updated_rows": applied_updates,
                 "resolved_symbols": len(pair_cache),
-            })
+                "candidate_updates": len(updates),
+            }
+            if update_errors:
+                response["warnings"] = update_errors
+            self._send(200, response)
         except Exception as e:
             self._send(500, {"status": "error", "message": str(e)})

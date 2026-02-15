@@ -242,13 +242,11 @@ async function getSessionOrThrow() {
 async function refreshTransactions() {
   setTxStatus("Loading transactions...");
 
-  try {
-    await syncSecurityNamesForUserTransactions();
-  } catch (e) {
+  syncSecurityNamesForUserTransactions().catch((e) => {
     const msg = e?.message || String(e);
     console.warn("Security-name sync skipped:", msg);
     setTxStatus(`Loading transactions... (name sync warning: ${msg})`);
-  }
+  });
 
   const { data, error } = await supabaseClient
     .from("transactions")
@@ -1056,6 +1054,25 @@ async function ensureSecurityNamesBackfilledSilently() {
 
 /* ---------- Add / Edit ---------- */
 
+async function enrichTransactionMetadataInBackground(txId, user_id, symbol, txn_date) {
+  try {
+    const resolved = await fetchSecurityDataForSymbol(symbol, user_id, txn_date);
+    const patch = {};
+    if (resolved?.security_name) patch.security_name = resolved.security_name;
+    if (resolved?.txn_close_price && resolved.txn_close_price !== "unavailable") {
+      patch.txn_close_price = resolved.txn_close_price;
+    }
+    if (!Object.keys(patch).length) return;
+    await supabaseClient
+      .from("transactions")
+      .update(patch)
+      .eq("id", txId)
+      .eq("user_id", user_id);
+  } catch (e) {
+    console.warn("Background metadata enrichment failed:", e?.message || e);
+  }
+}
+
 addTxBtn.addEventListener("click", async () => {
   const symbol = txSymbolEl.value.trim().toUpperCase();
   const txn_date = txDateEl.value;
@@ -1073,22 +1090,20 @@ addTxBtn.addEventListener("click", async () => {
   try {
     const session = await getSessionOrThrow();
     const user_id = session.user.id;
-    let securityData;
-    try {
-      securityData = await fetchSecurityDataForSymbol(symbol, user_id, txn_date);
-    } catch (resolverError) {
-      console.warn("Security metadata resolver fallback:", resolverError?.message || resolverError);
-      securityData = { security_name: symbol, txn_close_price: "unavailable" };
-    }
-    const security_name = securityData.security_name || symbol;
-    const txn_close_price = securityData.txn_close_price || "unavailable";
+    const security_name = symbol;
+    const txn_close_price = "unavailable";
 
     let error;
+    let savedId = editingTxId;
 
     if (!editingTxId) {
-      ({ error } = await supabaseClient.from("transactions").insert([{
-        user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price
-      }]));
+      const { data: inserted, error: insertError } = await supabaseClient
+        .from("transactions")
+        .insert([{ user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price }])
+        .select("id")
+        .single();
+      error = insertError;
+      savedId = inserted?.id || null;
     } else {
       ({ error } = await supabaseClient
         .from("transactions")
@@ -1110,6 +1125,12 @@ addTxBtn.addEventListener("click", async () => {
       setAddEditStatus("Saved ✅");
       txQtyEl.value = "";
       txPriceEl.value = "";
+    }
+
+    if (savedId) {
+      void enrichTransactionMetadataInBackground(savedId, user_id, symbol, txn_date)
+        .then(() => refreshTransactions())
+        .catch((e) => console.warn("Background refresh failed:", e?.message || e));
     }
 
     // Don't keep Add/Edit status blocked if background refresh sync is slow.

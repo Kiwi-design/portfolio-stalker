@@ -899,6 +899,19 @@ async function getCachedSecurityNameForISIN(user_id, symbol) {
   return "";
 }
 
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchSecurityDataForSymbol(symbol, user_id, txn_date) {
   const normalized = String(symbol || "").trim().toUpperCase();
   if (!normalized) return { security_name: "", txn_close_price: "unavailable" };
@@ -915,8 +928,7 @@ async function fetchSecurityDataForSymbol(symbol, user_id, txn_date) {
       const session = await getSessionOrThrow();
       const token = session.access_token;
       const url = `${API_BASE}/api/isin_name?${symbolParam}&txn_date=${encodeURIComponent(txn_date || "")}`;
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      const data = await res.json().catch(() => ({}));
+      const { res, data } = await fetchJsonWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, 12000);
       if (res.ok && data.status === "ok") {
         return {
           security_name: cached,
@@ -930,8 +942,7 @@ async function fetchSecurityDataForSymbol(symbol, user_id, txn_date) {
   const session = await getSessionOrThrow();
   const token = session.access_token;
   const url = `${API_BASE}/api/isin_name?${symbolParam}&txn_date=${encodeURIComponent(txn_date || "")}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  const data = await res.json().catch(() => ({}));
+  const { res, data } = await fetchJsonWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, 12000);
   if (!res.ok || data.status !== "ok") {
     const message = data?.message || `Unable to resolve security data for ${normalized}`;
     throw new Error(message);
@@ -1063,8 +1074,14 @@ addTxBtn.addEventListener("click", async () => {
   try {
     const session = await getSessionOrThrow();
     const user_id = session.user.id;
-    const securityData = await fetchSecurityDataForSymbol(symbol, user_id, txn_date);
-    const security_name = securityData.security_name;
+    let securityData;
+    try {
+      securityData = await fetchSecurityDataForSymbol(symbol, user_id, txn_date);
+    } catch (resolverError) {
+      console.warn("Security metadata resolver fallback:", resolverError?.message || resolverError);
+      securityData = { security_name: symbol, txn_close_price: Number(price).toFixed(4) };
+    }
+    const security_name = securityData.security_name || symbol;
     const txn_close_price = securityData.txn_close_price || Number(price).toFixed(4);
 
     let error;

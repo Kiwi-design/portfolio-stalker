@@ -955,32 +955,63 @@ async function cleanupInvalidSecurityNamesForUser() {
       .eq("security_name", invalid);
   }
 
-  // If security_name was accidentally set equal to ISIN, clear it too.
   const { data, error } = await supabaseClient
     .from("transactions")
     .select("id, symbol, security_name")
     .eq("user_id", user_id)
-    .not("security_name", "is", null)
     .limit(5000);
 
   if (error || !data?.length) return;
 
-  const badIds = data
-    .filter((r) => {
-      const sym = String(r.symbol || "").trim().toUpperCase();
-      const name = String(r.security_name || "").trim().toUpperCase();
-      return sym && name && sym === name;
-    })
-    .map((r) => r.id);
+  // Build canonical names from already valid values in this user's table.
+  const canonicalBySymbol = new Map();
+  for (const row of data) {
+    const symbol = String(row.symbol || "").trim().toUpperCase();
+    const candidate = normalizeStoredSecurityName(row.security_name, symbol);
+    if (!symbol || !candidate) continue;
+    if (!canonicalBySymbol.has(symbol)) canonicalBySymbol.set(symbol, candidate);
+  }
 
-  for (const id of badIds) {
+  // Fill NULL/invalid rows from canonical names first.
+  for (const row of data) {
+    const symbol = String(row.symbol || "").trim().toUpperCase();
+    const current = normalizeStoredSecurityName(row.security_name, symbol);
+    if (current || !symbol) continue;
+    const canonical = canonicalBySymbol.get(symbol);
+    if (!canonical) continue;
     await supabaseClient
       .from("transactions")
-      .update({ security_name: null })
+      .update({ security_name: canonical })
       .eq("user_id", user_id)
-      .eq("id", id);
+      .eq("id", row.id);
+  }
+
+  // For symbols still unresolved, fetch once and apply to all matching rows.
+  const unresolvedSymbols = new Set();
+  for (const row of data) {
+    const symbol = String(row.symbol || "").trim().toUpperCase();
+    if (!symbol) continue;
+    if (canonicalBySymbol.has(symbol)) continue;
+    const current = normalizeStoredSecurityName(row.security_name, symbol);
+    if (!current && isLikelyISIN(symbol)) unresolvedSymbols.add(symbol);
+  }
+
+  for (const symbol of unresolvedSymbols) {
+    try {
+      const resolved = await fetchSecurityNameForISIN(symbol, user_id);
+      if (!resolved) continue;
+      canonicalBySymbol.set(symbol, resolved);
+      await supabaseClient
+        .from("transactions")
+        .update({ security_name: resolved })
+        .eq("user_id", user_id)
+        .eq("symbol", symbol);
+    } catch (e) {
+      console.warn(`Could not resolve ${symbol}:`, e.message || e);
+    }
   }
 }
+
 
 async function ensureSecurityNamesBackfilledSilently() {
   try {

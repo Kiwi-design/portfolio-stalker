@@ -378,6 +378,8 @@ def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
     market_types = ["funds", "stocks", "bonds", "etfs", "certificates", "indices"]
     basic_fields = ["BasicV2", "BasicV1"]
 
+    best_prior = None
+
     for market_type in market_types:
         exchanges = []
         for basic in basic_fields:
@@ -422,25 +424,31 @@ def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
                     if page > 0:
                         break
                     continue
+
                 for item in items:
                     item_date = normalize_payload_date(item.get("DATETIME_LAST") or item.get("date") or "")
-                    if item_date != txn_date:
+                    if not item_date:
                         continue
                     close_val = maybe_parse_float(item.get("LAST"))
                     if close_val is None:
                         close_val = maybe_parse_float(item.get("close"))
-                    if close_val is not None:
+                    if close_val is None:
+                        continue
+
+                    if item_date == txn_date:
                         return f"{close_val:.4f}"
 
+                    if item_date <= txn_date:
+                        if best_prior is None or item_date > best_prior[0]:
+                            best_prior = (item_date, close_val)
+
+    if best_prior is not None:
+        return f"{best_prior[1]:.4f}"
     return ""
 
 def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
     if not txn_date:
         return ""
-    direct = bnp_marketdata_history_close_for_isin_date(isin, txn_date)
-    if direct:
-        return direct
-
     direct = bnp_marketdata_history_close_for_isin_date(isin, txn_date)
     if direct:
         return direct

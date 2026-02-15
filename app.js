@@ -885,19 +885,10 @@ async function fetchSecurityNameForISIN(symbol) {
   }
 
   const name = (data?.name || "").trim();
-  return name || normalized;
-  const session = await getSessionOrThrow();
-  const token = session.access_token;
-
-  const res = await fetch(`${API_BASE}/api/isin_name?isin=${encodeURIComponent(symbol)}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  const data = await res.json();
-  if (!res.ok || data.status !== "ok" || !data.name) {
-    const message = data?.message || `Unable to resolve security name for ${symbol}`;
-    throw new Error(message);
+  if (!name || name.toUpperCase() === normalized) {
+    throw new Error(`No security name found for ISIN ${normalized}`);
   }
-  return data.name;
+  return name;
 }
 
 async function syncSecurityNamesForUserTransactions() {
@@ -1004,7 +995,13 @@ loginBtn.addEventListener("click", async () => {
   const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
   if (error) { setStatus("Login error: " + error.message); return; }
 
-  setLoggedInUI(data.user.email);
+  const loginEmail = data?.user?.email;
+  if (!loginEmail) {
+    setStatus("Login error: session returned without user email.");
+    return;
+  }
+
+  setLoggedInUI(loginEmail);
   await refreshPortfolioDailyValueOnLogin();
   await loadPortfolioAndPerformance();
 });

@@ -245,7 +245,9 @@ async function refreshTransactions() {
   try {
     await syncSecurityNamesForUserTransactions();
   } catch (e) {
-    console.warn("Security-name sync skipped:", e.message || e);
+    const msg = e?.message || String(e);
+    console.warn("Security-name sync skipped:", msg);
+    setTxStatus(`Loading transactions... (name sync warning: ${msg})`);
   }
 
   const { data, error } = await supabaseClient

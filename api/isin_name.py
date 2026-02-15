@@ -277,17 +277,22 @@ class handler(BaseHTTPRequestHandler):
             )
 
             missing_symbols = set()
+            resolved = {}
             for row in txs:
                 row_isin = normalize_isin(row.get("symbol"))
                 if not row_isin:
                     continue
                 old_name = normalize_name(row.get("security_name"))
-                if not old_name or normalize_isin(old_name) == row_isin:
-                    missing_symbols.add(row_isin)
+                if old_name and normalize_isin(old_name) != row_isin:
+                    # Reuse already-known names from the table for this ISIN.
+                    resolved[row_isin] = old_name
+                    continue
+                missing_symbols.add(row_isin)
 
-            resolved = {}
             updates = []
             for symbol in sorted(missing_symbols):
+                if symbol in resolved:
+                    continue
                 lookup = bnp_find_url_and_name_for_isin(symbol)
                 resolved_name = normalize_name((lookup or {}).get("name"))
                 if resolved_name and normalize_isin(resolved_name) != symbol:

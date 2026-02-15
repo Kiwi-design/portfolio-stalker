@@ -961,14 +961,13 @@ async function syncSecurityNamesForUserTransactions() {
   const session = await getSessionOrThrow();
   const token = session.access_token;
 
-  const res = await fetch(`${API_BASE}/api/isin_name`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
+  const { res, data } = await fetchJsonWithTimeout(
+    `${API_BASE}/api/isin_name`,
+    { headers: { Authorization: `Bearer ${token}` } },
+    15000,
+  );
 
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data?.message || "Could not sync ISIN security names");
-  }
+  if (!res.ok) throw new Error(data?.message || "Could not sync ISIN security names");
 }
 
 
@@ -1079,10 +1078,10 @@ addTxBtn.addEventListener("click", async () => {
       securityData = await fetchSecurityDataForSymbol(symbol, user_id, txn_date);
     } catch (resolverError) {
       console.warn("Security metadata resolver fallback:", resolverError?.message || resolverError);
-      securityData = { security_name: symbol, txn_close_price: Number(price).toFixed(4) };
+      securityData = { security_name: symbol, txn_close_price: "unavailable" };
     }
     const security_name = securityData.security_name || symbol;
-    const txn_close_price = securityData.txn_close_price || Number(price).toFixed(4);
+    const txn_close_price = securityData.txn_close_price || "unavailable";
 
     let error;
 
@@ -1113,7 +1112,10 @@ addTxBtn.addEventListener("click", async () => {
       txPriceEl.value = "";
     }
 
-    await refreshTransactions();
+    // Don't keep Add/Edit status blocked if background refresh sync is slow.
+    refreshTransactions().catch((e) => {
+      console.warn("Post-save refresh failed:", e?.message || e);
+    });
   } catch (e) {
     setAddEditStatus("Error: " + e.message);
   }

@@ -939,6 +939,15 @@ async function syncSecurityNamesForUserTransactions() {
   }
 }
 
+
+async function ensureSecurityNamesBackfilledSilently() {
+  try {
+    await syncSecurityNamesForUserTransactions();
+  } catch (e) {
+    console.warn("Background security-name sync failed:", e.message || e);
+  }
+}
+
 /* ---------- Add / Edit ---------- */
 
 addTxBtn.addEventListener("click", async () => {
@@ -1013,6 +1022,7 @@ signupBtn.addEventListener("click", async () => {
 
   if (data.session?.user?.email) {
     setLoggedInUI(data.session.user.email);
+    await ensureSecurityNamesBackfilledSilently();
     await refreshPortfolioDailyValueOnLogin();
     await loadPortfolioAndPerformance();
   } else {
@@ -1036,6 +1046,7 @@ loginBtn.addEventListener("click", async () => {
   }
 
   setLoggedInUI(loginEmail);
+  await ensureSecurityNamesBackfilledSilently();
   await refreshPortfolioDailyValueOnLogin();
   await loadPortfolioAndPerformance();
 });
@@ -1055,6 +1066,7 @@ logoutBtn.addEventListener("click", async () => {
   const session = data.session;
   if (session?.user?.email) {
     setLoggedInUI(session.user.email);
+    await ensureSecurityNamesBackfilledSilently();
     await refreshPortfolioDailyValueOnLogin();
     await loadPortfolioAndPerformance();
   } else {

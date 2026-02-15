@@ -393,6 +393,10 @@ function quantile(sortedVals, q) {
   return sortedVals[lo] + (sortedVals[hi] - sortedVals[lo]) * (pos - lo);
 }
 
+function isLikelyISIN(value) {
+  return /^[A-Z]{2}[A-Z0-9]{10}$/.test(String(value || "").trim().toUpperCase());
+}
+
 function toISODate(d) {
   return d.toISOString().slice(0, 10);
 }
@@ -865,6 +869,23 @@ loadPortfolioBtn.addEventListener("click", loadPortfolioAndPerformance);
 refreshPerfBtn.addEventListener("click", loadPortfolioAndPerformance);
 
 async function fetchSecurityNameForISIN(symbol) {
+  const normalized = String(symbol || "").trim().toUpperCase();
+  if (!isLikelyISIN(normalized)) return normalized;
+
+  const session = await getSessionOrThrow();
+  const token = session.access_token;
+
+  const res = await fetch(`${API_BASE}/api/isin_name?isin=${encodeURIComponent(normalized)}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.status !== "ok") {
+    const message = data?.message || `Unable to resolve security name for ${normalized}`;
+    throw new Error(message);
+  }
+
+  const name = (data?.name || "").trim();
+  return name || normalized;
   const session = await getSessionOrThrow();
   const token = session.access_token;
 

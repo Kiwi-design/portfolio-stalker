@@ -910,7 +910,7 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 12000) {
   }
 }
 
-async function fetchSecurityDataForSymbol(symbol, user_id, txn_date) {
+async function fetchSecurityDataForSymbol(symbol, user_id, txn_date, timeoutMs = 45000) {
   const normalized = String(symbol || "").trim().toUpperCase();
   if (!normalized) return { security_name: "", txn_close_price: "unavailable" };
   const symbolParam = isLikelyISIN(normalized)
@@ -926,7 +926,7 @@ async function fetchSecurityDataForSymbol(symbol, user_id, txn_date) {
       const session = await getSessionOrThrow();
       const token = session.access_token;
       const url = `${API_BASE}/api/isin_name?${symbolParam}&txn_date=${encodeURIComponent(txn_date || "")}`;
-      const { res, data } = await fetchJsonWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, 12000);
+      const { res, data } = await fetchJsonWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, timeoutMs);
       if (res.ok && data.status === "ok") {
         return {
           security_name: cached,
@@ -940,7 +940,7 @@ async function fetchSecurityDataForSymbol(symbol, user_id, txn_date) {
   const session = await getSessionOrThrow();
   const token = session.access_token;
   const url = `${API_BASE}/api/isin_name?${symbolParam}&txn_date=${encodeURIComponent(txn_date || "")}`;
-  const { res, data } = await fetchJsonWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, 12000);
+  const { res, data } = await fetchJsonWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, timeoutMs);
   if (!res.ok || data.status !== "ok") {
     const message = data?.message || `Unable to resolve security data for ${normalized}`;
     throw new Error(message);
@@ -959,12 +959,10 @@ async function syncSecurityNamesForUserTransactions() {
   const session = await getSessionOrThrow();
   const token = session.access_token;
 
-  const { res, data } = await fetchJsonWithTimeout(
-    `${API_BASE}/api/isin_name`,
-    { headers: { Authorization: `Bearer ${token}` } },
-    15000,
-  );
-
+  const res = await fetch(`${API_BASE}/api/isin_name`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.message || "Could not sync ISIN security names");
 }
 
@@ -1056,7 +1054,7 @@ async function ensureSecurityNamesBackfilledSilently() {
 
 async function enrichTransactionMetadataInBackground(txId, user_id, symbol, txn_date) {
   try {
-    const resolved = await fetchSecurityDataForSymbol(symbol, user_id, txn_date);
+    const resolved = await fetchSecurityDataForSymbol(symbol, user_id, txn_date, 90000);
     const patch = {};
     if (resolved?.security_name) patch.security_name = resolved.security_name;
     if (resolved?.txn_close_price && resolved.txn_close_price !== "unavailable") {

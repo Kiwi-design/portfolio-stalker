@@ -242,9 +242,15 @@ async function getSessionOrThrow() {
 async function refreshTransactions() {
   setTxStatus("Loading transactions...");
 
+  try {
+    await syncSecurityNamesForUserTransactions();
+  } catch (e) {
+    console.warn("Security-name sync skipped:", e.message || e);
+  }
+
   const { data, error } = await supabaseClient
     .from("transactions")
-    .select("id, user_id, symbol, txn_date, side, quantity, price, created_at")
+    .select("id, user_id, symbol, security_name, txn_date, side, quantity, price, created_at")
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
 
@@ -266,7 +272,7 @@ async function refreshTransactions() {
         <thead>
           <tr>
             <th>Date</th>
-            <th>Symbol</th>
+            <th>Security / ISIN</th>
             <th>Side</th>
             <th class="num">Qty</th>
             <th class="num">Price (EUR)</th>
@@ -277,10 +283,14 @@ async function refreshTransactions() {
   `;
 
   for (const r of data) {
+    const safeName = (r.security_name || "").trim();
     html += `
       <tr>
         <td>${r.txn_date}</td>
-        <td>${r.symbol}</td>
+        <td>
+          ${safeName ? `<div class="security-name">${safeName}</div>` : ""}
+          <div class="isin-symbol">${r.symbol}</div>
+        </td>
         <td>${r.side}</td>
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
         <td class="num">${Number(r.price).toFixed(4)}</td>
@@ -854,6 +864,35 @@ async function loadPortfolioAndPerformance() {
 loadPortfolioBtn.addEventListener("click", loadPortfolioAndPerformance);
 refreshPerfBtn.addEventListener("click", loadPortfolioAndPerformance);
 
+async function fetchSecurityNameForISIN(symbol) {
+  const session = await getSessionOrThrow();
+  const token = session.access_token;
+
+  const res = await fetch(`${API_BASE}/api/isin_name?isin=${encodeURIComponent(symbol)}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const data = await res.json();
+  if (!res.ok || data.status !== "ok" || !data.name) {
+    const message = data?.message || `Unable to resolve security name for ${symbol}`;
+    throw new Error(message);
+  }
+  return data.name;
+}
+
+async function syncSecurityNamesForUserTransactions() {
+  const session = await getSessionOrThrow();
+  const token = session.access_token;
+
+  const res = await fetch(`${API_BASE}/api/isin_name`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.message || "Could not sync ISIN security names");
+  }
+}
+
 /* ---------- Add / Edit ---------- */
 
 addTxBtn.addEventListener("click", async () => {
@@ -873,17 +912,18 @@ addTxBtn.addEventListener("click", async () => {
   try {
     const session = await getSessionOrThrow();
     const user_id = session.user.id;
+    const security_name = await fetchSecurityNameForISIN(symbol);
 
     let error;
 
     if (!editingTxId) {
       ({ error } = await supabaseClient.from("transactions").insert([{
-        user_id, symbol, txn_date, side, quantity, price
+        user_id, symbol, security_name, txn_date, side, quantity, price
       }]));
     } else {
       ({ error } = await supabaseClient
         .from("transactions")
-        .update({ symbol, txn_date, side, quantity, price })
+        .update({ symbol, security_name, txn_date, side, quantity, price })
         .eq("id", editingTxId)
         .eq("user_id", user_id)
       );

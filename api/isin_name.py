@@ -17,6 +17,7 @@ ISIN_RE = re.compile(r"\b[A-Z]{2}[A-Z0-9]{10}\b")
 INVALID_NAME_VALUES = {"", "null", "none", "n/a", "na", "undefined", "-"}
 BASE_DOMAIN = "https://www.wealthmanagement.bnpparibas.de"
 YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
+YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
 
 _BNP_COOKIE_JAR = http.cookiejar.CookieJar()
 _BNP_OPENER = build_opener(HTTPCookieProcessor(_BNP_COOKIE_JAR))
@@ -156,6 +157,38 @@ def yahoo_symbol_name(symbol):
     name = meta.get("shortName") or meta.get("longName") or ""
     return normalize_name(name)
 
+
+
+
+def yahoo_symbol_for_isin(isin):
+    try:
+        payload = fetch_json(
+            f"{YAHOO_SEARCH_URL}?q={quote_plus(isin)}",
+            headers={"User-Agent": UA, "Accept": "application/json"},
+            timeout=20,
+        )
+    except Exception:
+        return "", ""
+
+    quotes = payload.get("quotes") or []
+    best_symbol = ""
+    best_name = ""
+
+    for q in quotes:
+        if not isinstance(q, dict):
+            continue
+        symbol = normalize_symbol(q.get("symbol"))
+        if not symbol:
+            continue
+        name = normalize_name(q.get("shortname") or q.get("longname") or q.get("quoteType") or "")
+        q_isin = normalize_isin(q.get("isin") or "")
+        if q_isin == isin:
+            return symbol, name
+        if not best_symbol:
+            best_symbol = symbol
+            best_name = name
+
+    return best_symbol, best_name
 
 def yahoo_closing_price_for_symbol_date(symbol, txn_date):
     if not txn_date:
@@ -460,7 +493,15 @@ def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
 
     history_url = historical_prices_url_from_security_url(base_url)
     if history_url:
-        return find_closing_price_via_ajax(history_url, txn_date)
+        parsed = find_closing_price_via_ajax(history_url, txn_date)
+        if parsed and parsed != "unavailable":
+            return parsed
+
+    y_symbol, _ = yahoo_symbol_for_isin(isin)
+    if y_symbol:
+        y_close = yahoo_closing_price_for_symbol_date(y_symbol, txn_date)
+        if y_close and y_close != "unavailable":
+            return y_close
 
     return "unavailable"
 
@@ -469,11 +510,19 @@ def resolve_security_metadata(isin, txn_date=None):
     lookup = bnp_find_url_and_name_for_isin(isin)
     name = normalize_name((lookup or {}).get("name"))
     security_url = (lookup or {}).get("url", "")
+
+    yahoo_symbol, yahoo_name = yahoo_symbol_for_isin(isin)
+    if not name and yahoo_name:
+        name = yahoo_name
+
     close_price = bnp_closing_price_for_isin_date(isin, txn_date, security_url=security_url) if txn_date else ""
+    if (not close_price or close_price == "unavailable") and txn_date and yahoo_symbol:
+        close_price = yahoo_closing_price_for_symbol_date(yahoo_symbol, txn_date)
+
     return {
         "name": name,
         "url": security_url,
-        "source": (lookup or {}).get("source", ""),
+        "source": (lookup or {}).get("source", "") or ("yahoo" if yahoo_symbol else ""),
         "category": (lookup or {}).get("category", ""),
         "txn_close_price": normalize_txn_close_price(close_price),
     }
@@ -849,7 +898,7 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             txs = fetch_json(
-                f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=id,symbol,txn_date,security_name,txn_close_price",
+                f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=id,symbol,txn_date,security_name,txn_close_price,price",
                 supa_headers,
             )
 
@@ -902,7 +951,11 @@ class handler(BaseHTTPRequestHandler):
                 if needs_name and meta.get("name"):
                     update_row["security_name"] = meta["name"]
                 if needs_close:
-                    update_row["txn_close_price"] = meta.get("txn_close_price") or "unavailable"
+                    resolved_close = meta.get("txn_close_price")
+                    if not resolved_close:
+                        fallback_price = maybe_parse_float(row.get("price"))
+                        resolved_close = f"{fallback_price:.4f}" if fallback_price is not None else "unavailable"
+                    update_row["txn_close_price"] = resolved_close
 
                 if len(update_row) > 2:
                     updates.append(update_row)

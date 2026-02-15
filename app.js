@@ -1065,7 +1065,7 @@ addTxBtn.addEventListener("click", async () => {
     const user_id = session.user.id;
     const securityData = await fetchSecurityDataForSymbol(symbol, user_id, txn_date);
     const security_name = securityData.security_name;
-    const txn_close_price = securityData.txn_close_price || "unavailable";
+    const txn_close_price = securityData.txn_close_price || Number(price).toFixed(4);
 
     let error;
 

@@ -1,8 +1,9 @@
 from http.server import BaseHTTPRequestHandler
-import os, json
+import os, json, re
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode, quote
 from datetime import datetime, timedelta, timezone
+from api.isin_name import resolve_security_metadata, resolve_symbol_metadata, normalize_isin
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -148,7 +149,7 @@ class handler(BaseHTTPRequestHandler):
                     table_cache_enabled[table] = False
 
             txs = fetch_json(
-                f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date,created_at",
+                f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date,created_at,txn_close_price",
                 supa_rest_headers,
             )
 
@@ -170,17 +171,174 @@ class handler(BaseHTTPRequestHandler):
                     "price_eur": price_eur,
                     "txn_date": d,
                     "created_at": created_at,
+                    "txn_close_price": str(t.get("txn_close_price") or ""),
                 })
             norm.sort(key=lambda x: (x["txn_date"], x["created_at"], x["symbol"]))
+
+
+            def parse_close_price_and_currency(text):
+                raw = str(text or "").strip()
+                if not raw or raw.lower() == "unavailable":
+                    return None, ""
+                m = re.search(r"\b([A-Z]{3})$", raw)
+                ccy = m.group(1) if m else ""
+                num_part = raw[:m.start()].strip() if m else raw
+                num_part = num_part.replace(" ", "")
+                if num_part.count(",") == 1 and num_part.count(".") >= 1:
+                    num_part = num_part.replace(".", "").replace(",", ".")
+                else:
+                    num_part = num_part.replace(",", ".")
+                try:
+                    return float(num_part), ccy
+                except Exception:
+                    return None, ccy
+
+            def is_business_day(d):
+                return d.weekday() < 5
+
+            def move_to_business_day(d):
+                while not is_business_day(d):
+                    d += timedelta(days=1)
+                return d
+
+            def add_business_days(d, days):
+                cur = d
+                left = int(days)
+                while left > 0:
+                    cur += timedelta(days=1)
+                    if is_business_day(cur):
+                        left -= 1
+                return cur
+
+            def last_business_day_of_month(year, month):
+                if month == 12:
+                    nxt = datetime(year + 1, 1, 1).date()
+                else:
+                    nxt = datetime(year, month + 1, 1).date()
+                cur = nxt - timedelta(days=1)
+                while not is_business_day(cur):
+                    cur -= timedelta(days=1)
+                return cur
+
+            def build_valuation_events(norm_rows, today_iso):
+                if not norm_rows:
+                    return []
+                tx_dates = sorted({datetime.strptime(t["txn_date"], "%Y-%m-%d").date() for t in norm_rows})
+                first_date = tx_dates[0]
+
+                # Weekly transaction events
+                week_map = {}
+                for d in tx_dates:
+                    y, w, _ = d.isocalendar()
+                    week_map.setdefault((y, w), []).append(d)
+
+                events = set()
+                for days in week_map.values():
+                    days = sorted(days)
+                    if len(days) > 1:
+                        ev = add_business_days(days[-1], 1)
+                    else:
+                        ev = add_business_days(days[0], 3)
+                    events.add(move_to_business_day(ev))
+
+                # Month-end events
+                end_date = datetime.strptime(today_iso, "%Y-%m-%d").date()
+                y, m = first_date.year, first_date.month
+                while (y < end_date.year) or (y == end_date.year and m <= end_date.month):
+                    mo_end = last_business_day_of_month(y, m)
+                    if mo_end >= first_date and mo_end <= end_date:
+                        events.add(mo_end)
+                    if m == 12:
+                        y += 1
+                        m = 1
+                    else:
+                        m += 1
+
+                # Ensure event series starts at first transaction date.
+                events.add(move_to_business_day(first_date))
+
+                return sorted(d.strftime("%Y-%m-%d") for d in events if d <= end_date)
+
+            def rebuild_prices_events_table(norm_rows, today_iso):
+                if not norm_rows:
+                    return 0
+                valuation_events = build_valuation_events(norm_rows, today_iso)
+                if not valuation_events:
+                    return 0
+
+                tx_close_map = {}
+                for t in norm_rows:
+                    v, c = parse_close_price_and_currency(t.get("txn_close_price"))
+                    if v is None:
+                        continue
+                    sym = t["symbol"]
+                    d = t["txn_date"]
+                    tx_close_map.setdefault(sym, {})[d] = (v, c)
+
+                def latest_tx_close_on_or_before(sym, date_iso):
+                    rows = tx_close_map.get(sym) or {}
+                    candidates = [d for d in rows.keys() if d <= date_iso]
+                    if not candidates:
+                        return None, ""
+                    return rows[max(candidates)]
+
+                tx_sorted = sorted(norm_rows, key=lambda x: (x["txn_date"], x["created_at"], x["symbol"]))
+                idx = 0
+                holdings = {}
+                out_rows = []
+                seen = set()
+                for ev in valuation_events:
+                    while idx < len(tx_sorted) and tx_sorted[idx]["txn_date"] <= ev:
+                        t = tx_sorted[idx]
+                        sym = t["symbol"]
+                        qty = float(t["quantity"])
+                        if t["side"] == "BUY":
+                            holdings[sym] = holdings.get(sym, 0.0) + qty
+                        else:
+                            holdings[sym] = max(0.0, holdings.get(sym, 0.0) - qty)
+                        idx += 1
+
+                    open_symbols = [sym for sym, q in holdings.items() if q > 1e-12]
+                    for sym in sorted(open_symbols):
+                        isin = normalize_isin(sym)
+                        try:
+                            meta = resolve_security_metadata(isin, txn_date=ev) if isin else resolve_symbol_metadata(sym, txn_date=ev)
+                        except Exception:
+                            meta = {}
+                        raw_close = (meta or {}).get("txn_close_price") or ""
+                        close_val, ccy = parse_close_price_and_currency(raw_close)
+                        if close_val is None:
+                            close_val, ccy = latest_tx_close_on_or_before(sym, ev)
+                        if close_val is None:
+                            continue
+                        key = (sym, ev)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        out_rows.append({
+                            "symbol": sym,
+                            "date": ev,
+                            "close_native": close_val,
+                            "currency": ccy or "EUR",
+                            "source": "bnp_txn_close",
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        })
+
+                if out_rows:
+                    supa_upsert("prices", out_rows, "symbol,date")
+                return len(out_rows)
+
 
             # Price/FX caches backed by Supabase
             now_utc = datetime.now(timezone.utc)
             today = now_utc.strftime("%Y-%m-%d")
             one_year_ago = (now_utc - timedelta(days=365)).strftime("%Y-%m-%d")
 
+            prices_rows_written = rebuild_prices_events_table(norm, today)
+
             price_cache = {}  # symbol -> {date -> row}
             fx_cache = {}     # ccy -> {date -> row}
-            table_cache_enabled = {"prices_daily": True, "fx_daily": True}
+            table_cache_enabled = {"prices": True, "fx_daily": True}
             ensured_symbol_min = {}
             ensured_fx_min = {}
 
@@ -223,7 +381,7 @@ class handler(BaseHTTPRequestHandler):
             def save_prices(symbol, rows):
                 if not rows:
                     return
-                supa_upsert("prices_daily", rows, "symbol,date")
+                supa_upsert("prices", rows, "symbol,date")
                 entry = price_cache.setdefault(symbol, {})
                 for r in rows:
                     entry[r["date"]] = r
@@ -280,7 +438,7 @@ class handler(BaseHTTPRequestHandler):
                 if symbol in price_cache:
                     return price_cache[symbol]
                 rows = supa_get(
-                    "prices_daily",
+                    "prices",
                     {
                         "symbol": f"eq.{symbol}",
                         "select": "symbol,date,close_native,currency,source,updated_at",
@@ -305,51 +463,10 @@ class handler(BaseHTTPRequestHandler):
                 return fx_cache[ccy]
 
             def ensure_symbol_history(symbol, min_needed_date):
-                if not table_cache_enabled.get("prices_daily", True):
-                    return
-                prev = ensured_symbol_min.get(symbol)
-                if prev and prev <= min_needed_date:
-                    return
-                rows = load_prices(symbol)
-                if not rows:
-                    min_needed_date = min(min_needed_date, one_year_ago)
-
-                start = min_needed_date
-
-                # fetch only missing calendar dates + always refresh last 3 days
-                start_dt = datetime.strptime(start, "%Y-%m-%d")
-                end_dt = datetime.strptime(today, "%Y-%m-%d")
-                refresh_cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=3)).strftime("%Y-%m-%d")
-
-                wanted = []
-                d = start_dt
-                while d <= end_dt:
-                    ds = d.strftime("%Y-%m-%d")
-                    if (ds not in rows) or (ds >= refresh_cutoff):
-                        wanted.append(ds)
-                    d += timedelta(days=1)
-
-                for r_start, r_end in contiguous_ranges(wanted):
-                    payload = yahoo_daily_closes(symbol, r_start, r_end)
-                    raw_ccy = payload.get("currency")
-                    to_save = []
-                    for y in payload.get("rows") or []:
-                        ccy, close = normalize_price_and_ccy(raw_ccy, y["close"])
-                        if not ccy:
-                            continue
-                        to_save.append(
-                            {
-                                "symbol": symbol,
-                                "date": y["date"],
-                                "close_native": close,
-                                "currency": ccy,
-                                "source": "yahoo",
-                                "updated_at": now_utc.isoformat(),
-                            }
-                        )
-                    save_prices(symbol, to_save)
-                ensure_price_anchor_on_date(symbol, min_needed_date)
+                # prices table is event-based (not daily), so no Yahoo history backfill here.
                 ensured_symbol_min[symbol] = min_needed_date
+                return
+
 
             def ensure_fx_history(ccy, min_needed_date):
                 if not table_cache_enabled.get("fx_daily", True):
@@ -451,8 +568,13 @@ class handler(BaseHTTPRequestHandler):
                 row = latest_row_on_or_before(load_prices(symbol), date)
                 if row and row.get("currency"):
                     return normalize_ccy(row.get("currency"))
+                for t in norm:
+                    if t["symbol"] == symbol:
+                        _, ccy = parse_close_price_and_currency(t.get("txn_close_price"))
+                        if ccy:
+                            return normalize_ccy(ccy)
                 try:
-                    meta_trade = yahoo_meta(symbol, date)
+                    meta_trade = yahoo_meta(symbol)
                     return normalize_ccy(meta_trade.get("currency"))
                 except Exception:
                     return None
@@ -475,17 +597,6 @@ class handler(BaseHTTPRequestHandler):
                     return None, None
 
                 ccy, close = normalize_price_and_ccy(raw_ccy, price_now)
-                save_prices(
-                    symbol,
-                    [{
-                        "symbol": symbol,
-                        "date": today,
-                        "close_native": close,
-                        "currency": ccy,
-                        "source": "yahoo",
-                        "updated_at": now_utc.isoformat(),
-                    }],
-                )
                 return ccy, close
 
             # --- Average-cost tracking in NATIVE currency ---
@@ -697,6 +808,7 @@ class handler(BaseHTTPRequestHandler):
                     "total_realized_eur": total_realized_eur,
                 },
                 "errors": errors,
+                "prices_rows_written": prices_rows_written,
             })
 
         except Exception as e:

@@ -166,7 +166,7 @@ begin
     from holdings h
     left join lateral (
       select pd.close_native, pd.currency
-      from public.prices_daily pd
+      from public.prices pd
       where upper(trim(pd.symbol)) = h.symbol
         and pd.date <= h.valuation_date
         -- Never value historical rows with synthetic anchors copied from

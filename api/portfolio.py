@@ -224,6 +224,7 @@ class handler(BaseHTTPRequestHandler):
                 if not norm_rows:
                     return []
                 tx_dates = sorted({datetime.strptime(t["txn_date"], "%Y-%m-%d").date() for t in norm_rows})
+                first_date = tx_dates[0]
 
                 # Weekly transaction events
                 week_map = {}
@@ -241,7 +242,6 @@ class handler(BaseHTTPRequestHandler):
                     events.add(move_to_business_day(ev))
 
                 # Month-end events
-                first_date = tx_dates[0]
                 end_date = datetime.strptime(today_iso, "%Y-%m-%d").date()
                 y, m = first_date.year, first_date.month
                 while (y < end_date.year) or (y == end_date.year and m <= end_date.month):
@@ -254,6 +254,9 @@ class handler(BaseHTTPRequestHandler):
                     else:
                         m += 1
 
+                # Ensure event series starts at first transaction date.
+                events.add(move_to_business_day(first_date))
+
                 return sorted(d.strftime("%Y-%m-%d") for d in events if d <= end_date)
 
             def rebuild_prices_events_table(norm_rows, today_iso):
@@ -263,18 +266,21 @@ class handler(BaseHTTPRequestHandler):
                 if not valuation_events:
                     return 0
 
-                # remove existing rows from first transaction day forward, then refill
-                first_txn = min(t["txn_date"] for t in norm_rows)
-                req_del = Request(
-                    f"{supabase_url}/rest/v1/prices?date=gte.{first_txn}",
-                    headers={**supa_rest_headers, "Prefer": "return=minimal"},
-                    method="DELETE",
-                )
-                try:
-                    with urlopen(req_del, timeout=30):
-                        pass
-                except Exception:
-                    pass
+                tx_close_map = {}
+                for t in norm_rows:
+                    v, c = parse_close_price_and_currency(t.get("txn_close_price"))
+                    if v is None:
+                        continue
+                    sym = t["symbol"]
+                    d = t["txn_date"]
+                    tx_close_map.setdefault(sym, {})[d] = (v, c)
+
+                def latest_tx_close_on_or_before(sym, date_iso):
+                    rows = tx_close_map.get(sym) or {}
+                    candidates = [d for d in rows.keys() if d <= date_iso]
+                    if not candidates:
+                        return None, ""
+                    return rows[max(candidates)]
 
                 tx_sorted = sorted(norm_rows, key=lambda x: (x["txn_date"], x["created_at"], x["symbol"]))
                 idx = 0
@@ -295,9 +301,14 @@ class handler(BaseHTTPRequestHandler):
                     open_symbols = [sym for sym, q in holdings.items() if q > 1e-12]
                     for sym in sorted(open_symbols):
                         isin = normalize_isin(sym)
-                        meta = resolve_security_metadata(isin, txn_date=ev) if isin else resolve_symbol_metadata(sym, txn_date=ev)
+                        try:
+                            meta = resolve_security_metadata(isin, txn_date=ev) if isin else resolve_symbol_metadata(sym, txn_date=ev)
+                        except Exception:
+                            meta = {}
                         raw_close = (meta or {}).get("txn_close_price") or ""
                         close_val, ccy = parse_close_price_and_currency(raw_close)
+                        if close_val is None:
+                            close_val, ccy = latest_tx_close_on_or_before(sym, ev)
                         if close_val is None:
                             continue
                         key = (sym, ev)

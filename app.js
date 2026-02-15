@@ -242,9 +242,17 @@ async function getSessionOrThrow() {
 async function refreshTransactions() {
   setTxStatus("Loading transactions...");
 
+  try {
+    await syncSecurityNamesForUserTransactions();
+  } catch (e) {
+    const msg = e?.message || String(e);
+    console.warn("Security-name sync skipped:", msg);
+    setTxStatus(`Loading transactions... (name sync warning: ${msg})`);
+  }
+
   const { data, error } = await supabaseClient
     .from("transactions")
-    .select("id, user_id, symbol, txn_date, side, quantity, price, created_at")
+    .select("id, user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price, created_at")
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
 
@@ -266,7 +274,7 @@ async function refreshTransactions() {
         <thead>
           <tr>
             <th>Date</th>
-            <th>Symbol</th>
+            <th>Security / ISIN</th>
             <th>Side</th>
             <th class="num">Qty</th>
             <th class="num">Price (EUR)</th>
@@ -277,13 +285,20 @@ async function refreshTransactions() {
   `;
 
   for (const r of data) {
+    const safeName = (r.security_name || "").trim();
     html += `
       <tr>
         <td>${r.txn_date}</td>
-        <td>${r.symbol}</td>
+        <td>
+          ${safeName ? `<div class="security-name">${safeName}</div>` : ""}
+          <div class="isin-symbol">${r.symbol}</div>
+        </td>
         <td>${r.side}</td>
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
-        <td class="num">${Number(r.price).toFixed(4)}</td>
+        <td class="num">
+          <div>${Number(r.price).toFixed(4)}</div>
+          <div class="txn-close-price"><em>${(r.txn_close_price || "unavailable")}</em></div>
+        </td>
         <td>
           <button class="editTx"
             data-id="${r.id}"
@@ -381,6 +396,10 @@ function quantile(sortedVals, q) {
   const hi = Math.ceil(pos);
   if (lo === hi) return sortedVals[lo];
   return sortedVals[lo] + (sortedVals[hi] - sortedVals[lo]) * (pos - lo);
+}
+
+function isLikelyISIN(value) {
+  return /^[A-Z]{2}[A-Z0-9]{10}$/.test(String(value || "").trim().toUpperCase());
 }
 
 function toISODate(d) {
@@ -854,6 +873,164 @@ async function loadPortfolioAndPerformance() {
 loadPortfolioBtn.addEventListener("click", loadPortfolioAndPerformance);
 refreshPerfBtn.addEventListener("click", loadPortfolioAndPerformance);
 
+
+function normalizeStoredSecurityName(value, symbol) {
+  const name = String(value || "").trim();
+  if (!name) return "";
+  const normalizedSymbol = String(symbol || "").trim().toUpperCase();
+  if (name.toUpperCase() === normalizedSymbol) return "";
+  return name;
+}
+
+async function getCachedSecurityNameForISIN(user_id, symbol) {
+  const { data, error } = await supabaseClient
+    .from("transactions")
+    .select("security_name")
+    .eq("user_id", user_id)
+    .eq("symbol", symbol)
+    .not("security_name", "is", null)
+    .limit(20);
+
+  if (error) return "";
+  for (const row of (data || [])) {
+    const candidate = normalizeStoredSecurityName(row.security_name, symbol);
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
+async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
+  const normalized = String(symbol || "").trim().toUpperCase();
+  if (!isLikelyISIN(normalized)) return { security_name: normalized, txn_close_price: "unavailable" };
+
+  if (user_id) {
+    const cached = await getCachedSecurityNameForISIN(user_id, normalized);
+    if (cached) {
+      return { security_name: cached, txn_close_price: "unavailable" };
+    }
+  }
+
+  const session = await getSessionOrThrow();
+  const token = session.access_token;
+
+  const url = `${API_BASE}/api/isin_name?isin=${encodeURIComponent(normalized)}&txn_date=${encodeURIComponent(txn_date || "")}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.status !== "ok") {
+    const message = data?.message || `Unable to resolve security data for ${normalized}`;
+    throw new Error(message);
+  }
+
+  const security_name = normalizeStoredSecurityName(data?.name, normalized);
+  if (!security_name) {
+    throw new Error(`No security name found for ISIN ${normalized}`);
+  }
+  return {
+    security_name,
+    txn_close_price: (data?.txn_close_price || "unavailable").toString(),
+  };
+}
+
+
+
+async function syncSecurityNamesForUserTransactions() {
+  const session = await getSessionOrThrow();
+  const token = session.access_token;
+
+  const res = await fetch(`${API_BASE}/api/isin_name`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.message || "Could not sync ISIN security names");
+  }
+}
+
+
+
+async function cleanupInvalidSecurityNamesForUser() {
+  const session = await getSessionOrThrow();
+  const user_id = session.user.id;
+
+  // Normalize broken placeholder values before sync so backfill can refill them.
+  const invalidValues = ["NULL", "null", "None", "none", "N/A", "n/a", "undefined", "-"];
+  for (const invalid of invalidValues) {
+    await supabaseClient
+      .from("transactions")
+      .update({ security_name: null })
+      .eq("user_id", user_id)
+      .eq("security_name", invalid);
+  }
+
+  const { data, error } = await supabaseClient
+    .from("transactions")
+    .select("id, symbol, security_name")
+    .eq("user_id", user_id)
+    .limit(5000);
+
+  if (error || !data?.length) return;
+
+  // Build canonical names from already valid values in this user's table.
+  const canonicalBySymbol = new Map();
+  for (const row of data) {
+    const symbol = String(row.symbol || "").trim().toUpperCase();
+    const candidate = normalizeStoredSecurityName(row.security_name, symbol);
+    if (!symbol || !candidate) continue;
+    if (!canonicalBySymbol.has(symbol)) canonicalBySymbol.set(symbol, candidate);
+  }
+
+  // Fill NULL/invalid rows from canonical names first.
+  for (const row of data) {
+    const symbol = String(row.symbol || "").trim().toUpperCase();
+    const current = normalizeStoredSecurityName(row.security_name, symbol);
+    if (current || !symbol) continue;
+    const canonical = canonicalBySymbol.get(symbol);
+    if (!canonical) continue;
+    await supabaseClient
+      .from("transactions")
+      .update({ security_name: canonical })
+      .eq("user_id", user_id)
+      .eq("id", row.id);
+  }
+
+  // For symbols still unresolved, fetch once and apply to all matching rows.
+  const unresolvedSymbols = new Set();
+  for (const row of data) {
+    const symbol = String(row.symbol || "").trim().toUpperCase();
+    if (!symbol) continue;
+    if (canonicalBySymbol.has(symbol)) continue;
+    const current = normalizeStoredSecurityName(row.security_name, symbol);
+    if (!current && isLikelyISIN(symbol)) unresolvedSymbols.add(symbol);
+  }
+
+  for (const symbol of unresolvedSymbols) {
+    try {
+      const resolvedData = await fetchSecurityDataForISIN(symbol, user_id, "");
+      const resolved = resolvedData.security_name;
+      if (!resolved) continue;
+      canonicalBySymbol.set(symbol, resolved);
+      await supabaseClient
+        .from("transactions")
+        .update({ security_name: resolved, txn_close_price: "unavailable" })
+        .eq("user_id", user_id)
+        .eq("symbol", symbol);
+    } catch (e) {
+      console.warn(`Could not resolve ${symbol}:`, e.message || e);
+    }
+  }
+}
+
+
+async function ensureSecurityNamesBackfilledSilently() {
+  try {
+    await cleanupInvalidSecurityNamesForUser();
+    await syncSecurityNamesForUserTransactions();
+  } catch (e) {
+    console.warn("Background security-name sync failed:", e.message || e);
+  }
+}
+
 /* ---------- Add / Edit ---------- */
 
 addTxBtn.addEventListener("click", async () => {
@@ -873,17 +1050,20 @@ addTxBtn.addEventListener("click", async () => {
   try {
     const session = await getSessionOrThrow();
     const user_id = session.user.id;
+    const securityData = await fetchSecurityDataForISIN(symbol, user_id, txn_date);
+    const security_name = securityData.security_name;
+    const txn_close_price = securityData.txn_close_price || "unavailable";
 
     let error;
 
     if (!editingTxId) {
       ({ error } = await supabaseClient.from("transactions").insert([{
-        user_id, symbol, txn_date, side, quantity, price
+        user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price
       }]));
     } else {
       ({ error } = await supabaseClient
         .from("transactions")
-        .update({ symbol, txn_date, side, quantity, price })
+        .update({ symbol, security_name, txn_close_price, txn_date, side, quantity, price })
         .eq("id", editingTxId)
         .eq("user_id", user_id)
       );
@@ -927,6 +1107,7 @@ signupBtn.addEventListener("click", async () => {
 
   if (data.session?.user?.email) {
     setLoggedInUI(data.session.user.email);
+    await ensureSecurityNamesBackfilledSilently();
     await refreshPortfolioDailyValueOnLogin();
     await loadPortfolioAndPerformance();
   } else {
@@ -943,7 +1124,14 @@ loginBtn.addEventListener("click", async () => {
   const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
   if (error) { setStatus("Login error: " + error.message); return; }
 
-  setLoggedInUI(data.user.email);
+  const loginEmail = data?.user?.email;
+  if (!loginEmail) {
+    setStatus("Login error: session returned without user email.");
+    return;
+  }
+
+  setLoggedInUI(loginEmail);
+  await ensureSecurityNamesBackfilledSilently();
   await refreshPortfolioDailyValueOnLogin();
   await loadPortfolioAndPerformance();
 });
@@ -963,6 +1151,7 @@ logoutBtn.addEventListener("click", async () => {
   const session = data.session;
   if (session?.user?.email) {
     setLoggedInUI(session.user.email);
+    await ensureSecurityNamesBackfilledSilently();
     await refreshPortfolioDailyValueOnLogin();
     await loadPortfolioAndPerformance();
   } else {

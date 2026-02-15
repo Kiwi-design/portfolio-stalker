@@ -92,6 +92,9 @@ def bnp_find_url_and_name_for_isin(isin):
 
             matched = None
             for rec in walk_for_records(payload):
+            records = list(walk_for_records(payload))
+            matched = None
+            for rec in records:
                 rec_isin = normalize_isin(read_str(rec, ["isin", "symbol", "code", "identifier"]))
                 if not rec_isin:
                     blob = " ".join(
@@ -125,6 +128,25 @@ def bnp_find_url_and_name_for_isin(isin):
             if name:
                 return {"name": name, "url": url, "page": page, "source": build_ajax_url(template, page)}
 
+            if matched:
+                url = read_str(matched, ["url", "href", "path", "link"])
+                if url and url.startswith("/"):
+                    url = f"https://wealthmanagement.bnpparibas{url}"
+                name = read_str(matched, ["title", "name", "label", "securityName"])
+                if not name and url:
+                    try:
+                        html = fetch_text(url, headers={"User-Agent": UA, "Accept": "text/html"})
+                        m = re.search(r"<title>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+                        if m:
+                            name = re.sub(r"\s+", " ", m.group(1)).strip()
+                            name = re.sub(r"\s*\|\s*BNP.*$", "", name)
+                    except Exception:
+                        pass
+                if name:
+                    return {"name": name, "url": url, "page": page, "source": build_ajax_url(template, page)}
+                return {"name": "", "url": url, "page": page, "source": build_ajax_url(template, page)}
+
+    # Last fallback: directly try an ISIN details URL template (if configured)
     direct_template = os.environ.get("BNP_WM_ISIN_URL_TEMPLATE", "").strip()
     if direct_template:
         url = direct_template.replace("{isin}", quote_plus(isin))
@@ -137,6 +159,7 @@ def bnp_find_url_and_name_for_isin(isin):
                 title = normalize_name(title)
                 if title:
                     return {"name": title, "url": url, "source": "direct-template"}
+                return {"name": title, "url": url, "source": "direct-template"}
         except Exception:
             pass
 
@@ -211,6 +234,10 @@ class handler(BaseHTTPRequestHandler):
                     "fallback": True,
                     "message": f"No BNP Wealth Management name found for {isin}; using ISIN as fallback",
                 })
+                if not lookup or not lookup.get("name"):
+                    self._send(404, {"status": "error", "message": f"No BNP Wealth Management security name found for {isin}"})
+                    return
+                self._send(200, {"status": "ok", "isin": isin, **lookup})
                 return
 
             txs = fetch_json(
@@ -223,6 +250,9 @@ class handler(BaseHTTPRequestHandler):
             for symbol in symbols:
                 lookup = bnp_find_url_and_name_for_isin(symbol)
                 resolved[symbol] = normalize_name((lookup or {}).get("name")) or symbol
+                if not lookup or not lookup.get("name"):
+                    continue
+                resolved[symbol] = lookup.get("name")
 
             for row in txs:
                 row_isin = normalize_isin(row.get("symbol"))
@@ -230,6 +260,10 @@ class handler(BaseHTTPRequestHandler):
                     continue
                 new_name = resolved.get(row_isin) or row_isin
                 old_name = normalize_name(row.get("security_name"))
+                new_name = resolved.get(row_isin)
+                if not new_name:
+                    continue
+                old_name = (row.get("security_name") or "").strip()
                 if old_name == new_name:
                     continue
                 updates.append({"id": row.get("id"), "user_id": user_id, "security_name": new_name})

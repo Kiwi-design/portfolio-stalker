@@ -886,6 +886,18 @@ async function fetchSecurityNameForISIN(symbol) {
 
   const name = (data?.name || "").trim();
   return name || normalized;
+  const session = await getSessionOrThrow();
+  const token = session.access_token;
+
+  const res = await fetch(`${API_BASE}/api/isin_name?isin=${encodeURIComponent(symbol)}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const data = await res.json();
+  if (!res.ok || data.status !== "ok" || !data.name) {
+    const message = data?.message || `Unable to resolve security name for ${symbol}`;
+    throw new Error(message);
+  }
+  return data.name;
 }
 
 async function syncSecurityNamesForUserTransactions() {

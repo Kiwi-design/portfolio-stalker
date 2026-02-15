@@ -119,6 +119,16 @@ class handler(BaseHTTPRequestHandler):
                 "Accept": "application/json",
             }
 
+            # Shared caches/toggles used by Supabase helpers and rebuild pipeline.
+            now_utc = datetime.now(timezone.utc)
+            today = now_utc.strftime("%Y-%m-%d")
+            one_year_ago = (now_utc - timedelta(days=365)).strftime("%Y-%m-%d")
+            price_cache = {}  # symbol -> {date -> row}
+            fx_cache = {}     # ccy -> {date -> row}
+            table_cache_enabled = {"prices": True, "fx_daily": True}
+            ensured_symbol_min = {}
+            ensured_fx_min = {}
+
             def supa_get(table, params):
                 if not table_cache_enabled.get(table, True):
                     return []
@@ -267,12 +277,23 @@ class handler(BaseHTTPRequestHandler):
                     return 0
 
                 tx_close_map = {}
+                resolver_cache = {}
                 for t in norm_rows:
-                    v, c = parse_close_price_and_currency(t.get("txn_close_price"))
-                    if v is None:
-                        continue
                     sym = t["symbol"]
                     d = t["txn_date"]
+                    v, c = parse_close_price_and_currency(t.get("txn_close_price"))
+                    if v is None:
+                        key = (sym, d)
+                        if key not in resolver_cache:
+                            isin = normalize_isin(sym)
+                            try:
+                                meta_t = resolve_security_metadata(isin, txn_date=d) if isin else resolve_symbol_metadata(sym, txn_date=d)
+                            except Exception:
+                                meta_t = {}
+                            resolver_cache[key] = parse_close_price_and_currency((meta_t or {}).get("txn_close_price") or "")
+                        v, c = resolver_cache[key]
+                    if v is None:
+                        continue
                     tx_close_map.setdefault(sym, {})[d] = (v, c)
 
                 def latest_tx_close_on_or_before(sym, date_iso):
@@ -330,17 +351,7 @@ class handler(BaseHTTPRequestHandler):
 
 
             # Price/FX caches backed by Supabase
-            now_utc = datetime.now(timezone.utc)
-            today = now_utc.strftime("%Y-%m-%d")
-            one_year_ago = (now_utc - timedelta(days=365)).strftime("%Y-%m-%d")
-
             prices_rows_written = rebuild_prices_events_table(norm, today)
-
-            price_cache = {}  # symbol -> {date -> row}
-            fx_cache = {}     # ccy -> {date -> row}
-            table_cache_enabled = {"prices": True, "fx_daily": True}
-            ensured_symbol_min = {}
-            ensured_fx_min = {}
 
             def normalize_price_and_ccy(raw_ccy, raw_price):
                 c = raw_ccy
@@ -809,6 +820,7 @@ class handler(BaseHTTPRequestHandler):
                 },
                 "errors": errors,
                 "prices_rows_written": prices_rows_written,
+                "price_symbols_seen": len({t["symbol"] for t in norm}),
             })
 
         except Exception as e:

@@ -2,7 +2,8 @@ from http.server import BaseHTTPRequestHandler
 import json
 import os
 import re
-from urllib.parse import urlencode, urlparse, parse_qs, quote_plus
+from html import unescape
+from urllib.parse import quote_plus, parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 UA = (
@@ -12,12 +13,7 @@ UA = (
 )
 ISIN_RE = re.compile(r"\b[A-Z]{2}[A-Z0-9]{10}\b")
 INVALID_NAME_VALUES = {"", "null", "none", "n/a", "na", "undefined", "-"}
-
-
-def fetch_json(url, headers=None, timeout=25):
-    req = Request(url, headers=headers or {})
-    with urlopen(req, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+BASE_DOMAIN = "https://www.wealthmanagement.bnpparibas.de"
 
 
 def fetch_text(url, headers=None, timeout=25):
@@ -26,14 +22,8 @@ def fetch_text(url, headers=None, timeout=25):
         return response.read().decode("utf-8", errors="replace")
 
 
-def walk_for_records(value):
-    if isinstance(value, dict):
-        yield value
-        for item in value.values():
-            yield from walk_for_records(item)
-    elif isinstance(value, list):
-        for item in value:
-            yield from walk_for_records(item)
+def fetch_json(url, headers=None, timeout=25):
+    return json.loads(fetch_text(url, headers=headers, timeout=timeout))
 
 
 def read_str(record, keys):
@@ -60,87 +50,162 @@ def normalize_name(value):
     return name
 
 
-def build_ajax_url(template, page):
-    if "{page}" in template:
-        return template.format(page=page)
-    parsed = urlparse(template)
-    q = parse_qs(parsed.query)
-    q["page"] = [str(page)]
-    new_query = urlencode({k: v[0] for k, v in q.items()})
-    return parsed._replace(query=new_query).geturl()
+def to_absolute_url(path_or_url):
+    value = (path_or_url or "").strip()
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    if value.startswith("/"):
+        return f"{BASE_DOMAIN}{value}"
+    return f"{BASE_DOMAIN}/{value.lstrip('/')}"
+
+
+def extract_security_url_from_text(payload, isin):
+    isin_escaped = re.escape(isin)
+    patterns = [
+        rf"(/web/Wertpapier/[^\"'<\s?#]*-{isin_escaped})",
+        rf"(https?://www\.wealthmanagement\.bnpparibas\.de/web/Wertpapier/[^\"'<\s?#]*-{isin_escaped})",
+        rf"(https?:\\/\\/www\.wealthmanagement\.bnpparibas\.de\\/web\\/Wertpapier\\/[^\"'\s?#]*-{isin_escaped})",
+        rf"(\/web\/Wertpapier\/[^\"'\s?#]*-{isin_escaped})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, payload, flags=re.IGNORECASE)
+        if not m:
+            continue
+        found = m.group(1)
+        found = unescape(found).replace("\\/", "/")
+        found = found.split("?")[0].split("#")[0]
+        return to_absolute_url(found)
+    return ""
+
+
+def search_result_pages_for_isin(isin):
+    q = quote_plus(isin)
+    return [
+        f"{BASE_DOMAIN}/web/suche?search={q}",
+        f"{BASE_DOMAIN}/web/suche?q={q}",
+        f"{BASE_DOMAIN}/web/search?search={q}",
+        f"{BASE_DOMAIN}/web/search?q={q}",
+        f"{BASE_DOMAIN}/web/suchergebnis?search={q}",
+        f"{BASE_DOMAIN}/web/suchergebnis?q={q}",
+        f"{BASE_DOMAIN}/web/home?search={q}",
+    ]
+
+
+def search_json_endpoints_for_isin(isin):
+    q = quote_plus(isin)
+    return [
+        f"{BASE_DOMAIN}/web/suche/autocomplete?query={q}",
+        f"{BASE_DOMAIN}/web/search/autocomplete?query={q}",
+        f"{BASE_DOMAIN}/api/search?query={q}",
+        f"{BASE_DOMAIN}/o/search?query={q}",
+    ]
+
+
+def discover_security_url_for_isin(isin):
+    headers = {
+        "User-Agent": UA,
+        "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
+        "Referer": f"{BASE_DOMAIN}/web/home",
+    }
+
+    for candidate in search_result_pages_for_isin(isin):
+        try:
+            payload = fetch_text(candidate, headers=headers)
+        except Exception:
+            continue
+        security_url = extract_security_url_from_text(payload, isin)
+        if security_url:
+            return {"url": security_url, "source": candidate}
+
+    for candidate in search_json_endpoints_for_isin(isin):
+        try:
+            payload = fetch_text(candidate, headers=headers)
+        except Exception:
+            continue
+        security_url = extract_security_url_from_text(payload, isin)
+        if security_url:
+            return {"url": security_url, "source": candidate}
+
+    return None
+
+
+def extract_security_name_from_page(url):
+    html = fetch_text(
+        url,
+        headers={
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml",
+            "Referer": f"{BASE_DOMAIN}/web/home",
+        },
+    )
+
+    title_match = re.search(
+        r'<h1[^>]*class="[^"]*headline-small--fluid[^"]*"[^>]*title="([^"]+)"',
+        html,
+        flags=re.IGNORECASE,
+    )
+    if title_match:
+        return normalize_name(unescape(title_match.group(1)))
+
+    h1_match = re.search(
+        r'<h1[^>]*class="[^"]*headline-small--fluid[^"]*"[^>]*>(.*?)</h1>',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if h1_match:
+        text = re.sub(r"<[^>]+>", " ", h1_match.group(1))
+        text = unescape(re.sub(r"\s+", " ", text))
+        return normalize_name(text)
+
+    og_match = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html, flags=re.IGNORECASE)
+    if og_match:
+        return normalize_name(unescape(og_match.group(1)))
+
+    page_title = re.search(r"<title>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+    if page_title:
+        text = re.sub(r"\s+", " ", page_title.group(1)).strip()
+        text = re.sub(r"\s*\|\s*BNP.*$", "", text)
+        return normalize_name(unescape(text))
+
+    return ""
 
 
 def bnp_find_url_and_name_for_isin(isin):
-    templates = [
-        x.strip() for x in os.environ.get("BNP_WM_AJAX_HISTORY_URLS", "").split(",") if x.strip()
-    ]
-    if not templates:
-        templates = [
-            "https://wealthmanagement.bnpparibas/en/search/results/_jcr_content/ajaxhistory.json?page={page}",
-            "https://wealthmanagement.bnpparibas/en/search-results/_jcr_content/ajaxhistory.json?page={page}",
-        ]
+    discovered = discover_security_url_for_isin(isin)
+    if not discovered:
+        return None
 
-    page_limit = int(os.environ.get("BNP_WM_PAGE_LIMIT", "120"))
-    headers = {"User-Agent": UA, "Accept": "application/json"}
+    url = discovered.get("url")
+    if not url:
+        return None
 
-    for template in templates:
-        for page in range(1, page_limit + 1):
-            try:
-                payload = fetch_json(build_ajax_url(template, page), headers=headers)
-            except Exception:
-                break
+    try:
+        name = extract_security_name_from_page(url)
+    except Exception:
+        name = ""
 
-            matched = None
-            for rec in walk_for_records(payload):
-                rec_isin = normalize_isin(read_str(rec, ["isin", "symbol", "code", "identifier"]))
-                if not rec_isin:
-                    blob = " ".join(
-                        str(rec.get(key, ""))
-                        for key in ("url", "href", "path", "title", "name", "description")
-                    )
-                    rec_isin = normalize_isin(blob)
-                if rec_isin == isin:
-                    matched = rec
-                    break
+    name = normalize_name(name)
+    if not name:
+        return None
 
-            if not matched:
-                continue
+    if normalize_isin(name) == isin:
+        return None
 
-            url = read_str(matched, ["url", "href", "path", "link"])
-            if url and url.startswith("/"):
-                url = f"https://wealthmanagement.bnpparibas{url}"
+    parsed = urlparse(url)
+    path = parsed.path or ""
+    category = ""
+    m = re.search(r"/web/Wertpapier/([^/]+)/", path, flags=re.IGNORECASE)
+    if m:
+        category = m.group(1)
 
-            name = normalize_name(read_str(matched, ["title", "name", "label", "securityName"]))
-            if not name and url:
-                try:
-                    html = fetch_text(url, headers={"User-Agent": UA, "Accept": "text/html"})
-                    m = re.search(r"<title>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
-                    if m:
-                        title = re.sub(r"\s+", " ", m.group(1)).strip()
-                        title = re.sub(r"\s*\|\s*BNP.*$", "", title)
-                        name = normalize_name(title)
-                except Exception:
-                    pass
-
-            if name:
-                return {"name": name, "url": url, "page": page, "source": build_ajax_url(template, page)}
-
-    direct_template = os.environ.get("BNP_WM_ISIN_URL_TEMPLATE", "").strip()
-    if direct_template:
-        url = direct_template.replace("{isin}", quote_plus(isin))
-        try:
-            html = fetch_text(url, headers={"User-Agent": UA, "Accept": "text/html"})
-            m = re.search(r"<title>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
-            if m:
-                title = re.sub(r"\s+", " ", m.group(1)).strip()
-                title = re.sub(r"\s*\|\s*BNP.*$", "", title)
-                title = normalize_name(title)
-                if title:
-                    return {"name": title, "url": url, "source": "direct-template"}
-        except Exception:
-            pass
-
-    return None
+    return {
+        "name": name,
+        "url": url,
+        "source": discovered.get("source", ""),
+        "category": category,
+    }
 
 
 class handler(BaseHTTPRequestHandler):

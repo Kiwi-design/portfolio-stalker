@@ -297,7 +297,7 @@ async function refreshTransactions() {
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
         <td class="num">
           <div>${Number(r.price).toFixed(4)}</div>
-          <div class="txn-close-price"><em>${(r.txn_close_price || "unavailable")}</em></div>
+          <div class="txn-close-price">Close @ txn date: <em>${(r.txn_close_price || "unavailable")}</em></div>
         </td>
         <td>
           <button class="editTx"
@@ -899,9 +899,12 @@ async function getCachedSecurityNameForISIN(user_id, symbol) {
   return "";
 }
 
-async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
+async function fetchSecurityDataForSymbol(symbol, user_id, txn_date) {
   const normalized = String(symbol || "").trim().toUpperCase();
-  if (!isLikelyISIN(normalized)) return { security_name: normalized, txn_close_price: "unavailable" };
+  if (!normalized) return { security_name: "", txn_close_price: "unavailable" };
+  const symbolParam = isLikelyISIN(normalized)
+    ? `isin=${encodeURIComponent(normalized)}`
+    : `symbol=${encodeURIComponent(normalized)}`;
 
   if (user_id) {
     const cached = await getCachedSecurityNameForISIN(user_id, normalized);
@@ -909,10 +912,9 @@ async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
       return { security_name: cached, txn_close_price: "unavailable" };
     }
     if (cached && txn_date) {
-      // still call backend to resolve txn-date close price
       const session = await getSessionOrThrow();
       const token = session.access_token;
-      const url = `${API_BASE}/api/isin_name?isin=${encodeURIComponent(normalized)}&txn_date=${encodeURIComponent(txn_date || "")}`;
+      const url = `${API_BASE}/api/isin_name?${symbolParam}&txn_date=${encodeURIComponent(txn_date || "")}`;
       const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.status === "ok") {
@@ -927,8 +929,7 @@ async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
 
   const session = await getSessionOrThrow();
   const token = session.access_token;
-
-  const url = `${API_BASE}/api/isin_name?isin=${encodeURIComponent(normalized)}&txn_date=${encodeURIComponent(txn_date || "")}`;
+  const url = `${API_BASE}/api/isin_name?${symbolParam}&txn_date=${encodeURIComponent(txn_date || "")}`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.status !== "ok") {
@@ -936,10 +937,7 @@ async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
     throw new Error(message);
   }
 
-  const security_name = normalizeStoredSecurityName(data?.name, normalized);
-  if (!security_name) {
-    throw new Error(`No security name found for ISIN ${normalized}`);
-  }
+  const security_name = normalizeStoredSecurityName(data?.name, normalized) || normalized;
   return {
     security_name,
     txn_close_price: (data?.txn_close_price || "unavailable").toString(),
@@ -1021,7 +1019,7 @@ async function cleanupInvalidSecurityNamesForUser() {
 
   for (const symbol of unresolvedSymbols) {
     try {
-      const resolvedData = await fetchSecurityDataForISIN(symbol, user_id, "");
+      const resolvedData = await fetchSecurityDataForSymbol(symbol, user_id, "");
       const resolved = resolvedData.security_name;
       if (!resolved) continue;
       canonicalBySymbol.set(symbol, resolved);
@@ -1065,7 +1063,7 @@ addTxBtn.addEventListener("click", async () => {
   try {
     const session = await getSessionOrThrow();
     const user_id = session.user.id;
-    const securityData = await fetchSecurityDataForISIN(symbol, user_id, txn_date);
+    const securityData = await fetchSecurityDataForSymbol(symbol, user_id, txn_date);
     const security_name = securityData.security_name;
     const txn_close_price = securityData.txn_close_price || "unavailable";
 

@@ -252,7 +252,7 @@ async function refreshTransactions() {
 
   const { data, error } = await supabaseClient
     .from("transactions")
-    .select("id, user_id, symbol, security_name, txn_date, side, quantity, price, created_at")
+    .select("id, user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price, created_at")
     .order("txn_date", { ascending: false })
     .order("created_at", { ascending: false });
 
@@ -295,7 +295,10 @@ async function refreshTransactions() {
         </td>
         <td>${r.side}</td>
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
-        <td class="num">${Number(r.price).toFixed(4)}</td>
+        <td class="num">
+          <div>${Number(r.price).toFixed(4)}</div>
+          <div class="txn-close-price"><em>${(r.txn_close_price || "unavailable")}</em></div>
+        </td>
         <td>
           <button class="editTx"
             data-id="${r.id}"
@@ -896,33 +899,38 @@ async function getCachedSecurityNameForISIN(user_id, symbol) {
   return "";
 }
 
-async function fetchSecurityNameForISIN(symbol, user_id) {
+async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
   const normalized = String(symbol || "").trim().toUpperCase();
-  if (!isLikelyISIN(normalized)) return normalized;
+  if (!isLikelyISIN(normalized)) return { security_name: normalized, txn_close_price: "unavailable" };
 
   if (user_id) {
     const cached = await getCachedSecurityNameForISIN(user_id, normalized);
-    if (cached) return cached;
+    if (cached) {
+      return { security_name: cached, txn_close_price: "unavailable" };
+    }
   }
 
   const session = await getSessionOrThrow();
   const token = session.access_token;
 
-  const res = await fetch(`${API_BASE}/api/isin_name?isin=${encodeURIComponent(normalized)}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
+  const url = `${API_BASE}/api/isin_name?isin=${encodeURIComponent(normalized)}&txn_date=${encodeURIComponent(txn_date || "")}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.status !== "ok") {
-    const message = data?.message || `Unable to resolve security name for ${normalized}`;
+    const message = data?.message || `Unable to resolve security data for ${normalized}`;
     throw new Error(message);
   }
 
-  const name = normalizeStoredSecurityName(data?.name, normalized);
-  if (!name) {
+  const security_name = normalizeStoredSecurityName(data?.name, normalized);
+  if (!security_name) {
     throw new Error(`No security name found for ISIN ${normalized}`);
   }
-  return name;
+  return {
+    security_name,
+    txn_close_price: (data?.txn_close_price || "unavailable").toString(),
+  };
 }
+
 
 
 async function syncSecurityNamesForUserTransactions() {
@@ -998,12 +1006,13 @@ async function cleanupInvalidSecurityNamesForUser() {
 
   for (const symbol of unresolvedSymbols) {
     try {
-      const resolved = await fetchSecurityNameForISIN(symbol, user_id);
+      const resolvedData = await fetchSecurityDataForISIN(symbol, user_id, "");
+      const resolved = resolvedData.security_name;
       if (!resolved) continue;
       canonicalBySymbol.set(symbol, resolved);
       await supabaseClient
         .from("transactions")
-        .update({ security_name: resolved })
+        .update({ security_name: resolved, txn_close_price: "unavailable" })
         .eq("user_id", user_id)
         .eq("symbol", symbol);
     } catch (e) {
@@ -1041,18 +1050,20 @@ addTxBtn.addEventListener("click", async () => {
   try {
     const session = await getSessionOrThrow();
     const user_id = session.user.id;
-    const security_name = await fetchSecurityNameForISIN(symbol, user_id);
+    const securityData = await fetchSecurityDataForISIN(symbol, user_id, txn_date);
+    const security_name = securityData.security_name;
+    const txn_close_price = securityData.txn_close_price || "unavailable";
 
     let error;
 
     if (!editingTxId) {
       ({ error } = await supabaseClient.from("transactions").insert([{
-        user_id, symbol, security_name, txn_date, side, quantity, price
+        user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price
       }]));
     } else {
       ({ error } = await supabaseClient
         .from("transactions")
-        .update({ symbol, security_name, txn_date, side, quantity, price })
+        .update({ symbol, security_name, txn_close_price, txn_date, side, quantity, price })
         .eq("id", editingTxId)
         .eq("user_id", user_id)
       );

@@ -4,6 +4,7 @@ import os
 import re
 from html import unescape
 from urllib.parse import quote_plus, parse_qs, urlparse
+from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
 UA = (
@@ -48,6 +49,87 @@ def normalize_name(value):
     if name.lower() in INVALID_NAME_VALUES:
         return ""
     return name
+
+
+def normalize_txn_close_price(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    return text
+
+
+def txn_date_older_than_12m(txn_date):
+    try:
+        d = datetime.strptime(txn_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        return False
+    return (datetime.now(timezone.utc) - d).days > 366
+
+
+def extract_close_value(payload, txn_date):
+    # Try to find price values near the requested date.
+    d = re.escape(txn_date)
+    patterns = [
+        rf"{d}[^\n\r]{{0,120}}(?:close|closing|closePrice|price|nav)\"?\s*[:=]\s*\"?([0-9]+(?:[\\.,][0-9]+)?)",
+        rf"(?:close|closing|closePrice|price|nav)\"?\s*[:=]\s*\"?([0-9]+(?:[\\.,][0-9]+)?)[^\n\r]{{0,120}}{d}",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, payload, flags=re.IGNORECASE)
+        if m:
+            try:
+                return float(m.group(1).replace(',', '.'))
+            except Exception:
+                pass
+    return None
+
+
+def bnp_closing_price_for_isin_date(isin, txn_date):
+    if not txn_date:
+        return ""
+    if txn_date_older_than_12m(txn_date):
+        return "unavailable"
+
+    urls = [
+        f"{BASE_DOMAIN}/web/suche?search={quote_plus(isin)}",
+        f"{BASE_DOMAIN}/web/search?search={quote_plus(isin)}",
+        f"{BASE_DOMAIN}/web/suche/autocomplete?query={quote_plus(isin)}",
+    ]
+
+    extra_templates = [x.strip() for x in os.environ.get("BNP_WM_CLOSE_AJAX_URLS", "").split(",") if x.strip()]
+    for t in extra_templates:
+        urls.append(t.replace("{isin}", quote_plus(isin)).replace("{date}", txn_date))
+
+    headers = {
+        "User-Agent": UA,
+        "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
+        "Referer": f"{BASE_DOMAIN}/web/home",
+    }
+
+    for url in urls:
+        try:
+            payload = fetch_text(url, headers=headers)
+        except Exception:
+            continue
+        val = extract_close_value(payload, txn_date)
+        if val is not None:
+            return f"{val:.4f}"
+
+    return "unavailable"
+
+
+def resolve_security_metadata(isin, txn_date=None):
+    lookup = bnp_find_url_and_name_for_isin(isin)
+    name = normalize_name((lookup or {}).get("name"))
+    close_price = bnp_closing_price_for_isin_date(isin, txn_date) if txn_date else ""
+    return {
+        "name": name,
+        "url": (lookup or {}).get("url", ""),
+        "source": (lookup or {}).get("source", ""),
+        "category": (lookup or {}).get("category", ""),
+        "txn_close_price": normalize_txn_close_price(close_price),
+    }
 
 
 def to_absolute_url(path_or_url):
@@ -387,51 +469,61 @@ class handler(BaseHTTPRequestHandler):
             isin = normalize_isin((q.get("isin") or [""])[0])
 
             if isin:
-                lookup = bnp_find_url_and_name_for_isin(isin)
-                if not lookup or not lookup.get("name"):
-                    self._send(404, {"status": "error", "message": f"No BNP Wealth Management security name found for {isin}"})
+                txn_date = (q.get("txn_date") or [""])[0]
+                meta = resolve_security_metadata(isin, txn_date=txn_date)
+                if not meta.get("name"):
+                    self._send(404, {"status": "error", "message": f"No security name found for {isin}"})
                     return
-                self._send(200, {"status": "ok", "isin": isin, **lookup})
+                self._send(200, {"status": "ok", "isin": isin, **meta})
                 return
 
             txs = fetch_json(
-                f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=id,symbol,security_name",
+                f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=id,symbol,txn_date,security_name,txn_close_price",
                 supa_headers,
             )
 
-            missing_symbols = set()
-            resolved = {}
+            canonical_names = {}
             for row in txs:
                 row_isin = normalize_isin(row.get("symbol"))
-                if not row_isin:
-                    continue
                 old_name = normalize_name(row.get("security_name"))
-                if old_name and normalize_isin(old_name) != row_isin:
-                    # Reuse already-known names from the table for this ISIN.
-                    resolved[row_isin] = old_name
-                    continue
-                missing_symbols.add(row_isin)
+                if row_isin and old_name and normalize_isin(old_name) != row_isin:
+                    canonical_names[row_isin] = old_name
 
+            pair_cache = {}
             updates = []
-            for symbol in sorted(missing_symbols):
-                if symbol in resolved:
-                    continue
-                lookup = bnp_find_url_and_name_for_isin(symbol)
-                resolved_name = normalize_name((lookup or {}).get("name"))
-                if resolved_name and normalize_isin(resolved_name) != symbol:
-                    resolved[symbol] = resolved_name
-
             for row in txs:
+                row_id = row.get("id")
                 row_isin = normalize_isin(row.get("symbol"))
-                if not row_isin:
+                txn_date = str(row.get("txn_date") or "")
+                if not row_id or not row_isin:
                     continue
+
                 old_name = normalize_name(row.get("security_name"))
-                if old_name and normalize_isin(old_name) != row_isin:
+                old_close = normalize_txn_close_price(row.get("txn_close_price"))
+                needs_name = (not old_name) or (normalize_isin(old_name) == row_isin)
+                needs_close = not old_close
+
+                if not needs_name and not needs_close:
                     continue
-                new_name = resolved.get(row_isin)
-                if not new_name:
-                    continue
-                updates.append({"id": row.get("id"), "user_id": user_id, "security_name": new_name})
+
+                key = (row_isin, txn_date)
+                if key not in pair_cache:
+                    meta = resolve_security_metadata(row_isin, txn_date=txn_date)
+                    if canonical_names.get(row_isin):
+                        meta["name"] = canonical_names[row_isin]
+                    if meta.get("name"):
+                        canonical_names[row_isin] = meta["name"]
+                    pair_cache[key] = meta
+                meta = pair_cache[key]
+
+                update_row = {"id": row_id, "user_id": user_id}
+                if needs_name and meta.get("name"):
+                    update_row["security_name"] = meta["name"]
+                if needs_close:
+                    update_row["txn_close_price"] = meta.get("txn_close_price") or "unavailable"
+
+                if len(update_row) > 2:
+                    updates.append(update_row)
 
             if updates:
                 req = Request(

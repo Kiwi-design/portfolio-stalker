@@ -181,6 +181,7 @@
     .muted { color: #666; font-size: 13px; }
     .security-name { color: #222; font-weight: 600; white-space: normal; }
     .isin-symbol { color: #666; font-size: 12px; margin-top: 2px; }
+    .txn-close-price { color: #777; font-size: 12px; margin-top: 2px; }
 
     @media (max-width: 480px) {
       body { padding: 12px; }
@@ -286,6 +287,7 @@
         <button id="refreshTx" type="button">Refresh</button>
       </div>
 
+      <div class="muted" style="margin-top:8px;">Closing price in <em>italic</em> is BNP closing price on transaction date; if unavailable from AJAX/history, it is shown as unavailable.</div>
       <div id="txStatus"></div>
       <div id="txList" style="margin-top:10px;"></div>
     </div>
@@ -295,7 +297,7 @@
       <h2 style="margin-top:0;">Add / Edit transaction</h2>
 
       <div class="row">
-        <label>Symbol</label><br/>
+        <label>Symbol: insert the ISIN of the security</label><br/>
         <input id="txSymbol" type="text" placeholder="AAPL or IWVL.L" />
       </div>
 
@@ -348,6 +350,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=87"></script>
+  <script src="app.js?v=88"></script>
 </body>
 </html>

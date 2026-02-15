@@ -5,7 +5,8 @@ import re
 from html import unescape
 from urllib.parse import quote_plus, parse_qs, urlparse
 from datetime import datetime, timezone, timedelta
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
+import http.cookiejar
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -17,6 +18,10 @@ INVALID_NAME_VALUES = {"", "null", "none", "n/a", "na", "undefined", "-"}
 BASE_DOMAIN = "https://www.wealthmanagement.bnpparibas.de"
 YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
 
+_BNP_COOKIE_JAR = http.cookiejar.CookieJar()
+_BNP_OPENER = build_opener(HTTPCookieProcessor(_BNP_COOKIE_JAR))
+_BNP_PRIMED = False
+
 
 def fetch_text(url, headers=None, timeout=25):
     req = Request(url, headers=headers or {})
@@ -27,6 +32,42 @@ def fetch_text(url, headers=None, timeout=25):
 def fetch_json(url, headers=None, timeout=25):
     return json.loads(fetch_text(url, headers=headers, timeout=timeout))
 
+
+
+
+def bnp_fetch_text(url, headers=None, timeout=25):
+    req = Request(url, headers=headers or {})
+    with _BNP_OPENER.open(req, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def prime_bnp_session():
+    global _BNP_PRIMED
+    if _BNP_PRIMED:
+        return
+    headers = {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        bnp_fetch_text(f"{BASE_DOMAIN}/web/home", headers=headers, timeout=20)
+    except Exception:
+        pass
+    # best-effort cookie bootstrap used by marketdata endpoints
+    try:
+        bnp_fetch_text(
+            f"{BASE_DOMAIN}/web-sec-service/api/cookie/content",
+            headers={"User-Agent": UA, "Accept": "application/json", "Referer": f"{BASE_DOMAIN}/web/home"},
+            timeout=20,
+        )
+    except Exception:
+        pass
+    _BNP_PRIMED = True
+
+
+def bnp_fetch_json(url, headers=None, timeout=25):
+    prime_bnp_session()
+    return json.loads(bnp_fetch_text(url, headers=headers, timeout=timeout))
 
 def read_str(record, keys):
     for key in keys:
@@ -345,7 +386,7 @@ def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
                 f"?id={quote_plus(isin)}&field={basic}&field=ExchangesV2&field=ConditionsV1"
             )
             try:
-                payload = fetch_json(meta_url, headers=headers)
+                payload = bnp_fetch_json(meta_url, headers=headers)
             except Exception:
                 continue
             if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
@@ -367,7 +408,7 @@ def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
                     f"?id={quote_plus(consors_id)}&field=HistoryV1&page={page}&range=-5000&resolution=1D"
                 )
                 try:
-                    hist_payload = fetch_json(hist_url, headers=headers)
+                    hist_payload = bnp_fetch_json(hist_url, headers=headers)
                 except Exception:
                     if page > 0:
                         break
@@ -396,8 +437,9 @@ def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
 def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
     if not txn_date:
         return ""
-    if txn_date_older_than_12m(txn_date):
-        return "unavailable"
+    direct = bnp_marketdata_history_close_for_isin_date(isin, txn_date)
+    if direct:
+        return direct
 
     direct = bnp_marketdata_history_close_for_isin_date(isin, txn_date)
     if direct:
@@ -830,7 +872,7 @@ class handler(BaseHTTPRequestHandler):
                 old_close = normalize_txn_close_price(row.get("txn_close_price"))
                 is_placeholder_name = normalize_isin(old_name) == row_isin if row_isin else old_name.upper() == row_symbol
                 needs_name = (not old_name) or is_placeholder_name
-                needs_close = (not old_close) and (not txn_date_older_than_12m(txn_date))
+                needs_close = (not old_close)
 
                 if not needs_name and not needs_close:
                     continue

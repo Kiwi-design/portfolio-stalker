@@ -940,8 +940,51 @@ async function syncSecurityNamesForUserTransactions() {
 }
 
 
+
+async function cleanupInvalidSecurityNamesForUser() {
+  const session = await getSessionOrThrow();
+  const user_id = session.user.id;
+
+  // Normalize broken placeholder values before sync so backfill can refill them.
+  const invalidValues = ["NULL", "null", "None", "none", "N/A", "n/a", "undefined", "-"];
+  for (const invalid of invalidValues) {
+    await supabaseClient
+      .from("transactions")
+      .update({ security_name: null })
+      .eq("user_id", user_id)
+      .eq("security_name", invalid);
+  }
+
+  // If security_name was accidentally set equal to ISIN, clear it too.
+  const { data, error } = await supabaseClient
+    .from("transactions")
+    .select("id, symbol, security_name")
+    .eq("user_id", user_id)
+    .not("security_name", "is", null)
+    .limit(5000);
+
+  if (error || !data?.length) return;
+
+  const badIds = data
+    .filter((r) => {
+      const sym = String(r.symbol || "").trim().toUpperCase();
+      const name = String(r.security_name || "").trim().toUpperCase();
+      return sym && name && sym === name;
+    })
+    .map((r) => r.id);
+
+  for (const id of badIds) {
+    await supabaseClient
+      .from("transactions")
+      .update({ security_name: null })
+      .eq("user_id", user_id)
+      .eq("id", id);
+  }
+}
+
 async function ensureSecurityNamesBackfilledSilently() {
   try {
+    await cleanupInvalidSecurityNamesForUser();
     await syncSecurityNamesForUserTransactions();
   } catch (e) {
     console.warn("Background security-name sync failed:", e.message || e);

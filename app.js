@@ -905,7 +905,22 @@ async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
 
   if (user_id) {
     const cached = await getCachedSecurityNameForISIN(user_id, normalized);
-    if (cached) {
+    if (cached && !txn_date) {
+      return { security_name: cached, txn_close_price: "unavailable" };
+    }
+    if (cached && txn_date) {
+      // still call backend to resolve txn-date close price
+      const session = await getSessionOrThrow();
+      const token = session.access_token;
+      const url = `${API_BASE}/api/isin_name?isin=${encodeURIComponent(normalized)}&txn_date=${encodeURIComponent(txn_date || "")}`;
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status === "ok") {
+        return {
+          security_name: cached,
+          txn_close_price: (data?.txn_close_price || "unavailable").toString(),
+        };
+      }
       return { security_name: cached, txn_close_price: "unavailable" };
     }
   }
@@ -1012,7 +1027,7 @@ async function cleanupInvalidSecurityNamesForUser() {
       canonicalBySymbol.set(symbol, resolved);
       await supabaseClient
         .from("transactions")
-        .update({ security_name: resolved, txn_close_price: "unavailable" })
+        .update({ security_name: resolved })
         .eq("user_id", user_id)
         .eq("symbol", symbol);
     } catch (e) {

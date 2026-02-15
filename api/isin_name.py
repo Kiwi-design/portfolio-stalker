@@ -57,7 +57,7 @@ def normalize_txn_close_price(value):
     text = str(value).strip()
     if not text:
         return ""
-    if text.lower() in INVALID_NAME_VALUES:
+    if text.lower() in INVALID_NAME_VALUES or text.lower() == "unavailable":
         return ""
     return text
 
@@ -651,7 +651,7 @@ class handler(BaseHTTPRequestHandler):
                 old_name = normalize_name(row.get("security_name"))
                 old_close = normalize_txn_close_price(row.get("txn_close_price"))
                 needs_name = (not old_name) or (normalize_isin(old_name) == row_isin)
-                needs_close = not old_close
+                needs_close = (not old_close) and (not txn_date_older_than_12m(txn_date))
 
                 if not needs_name and not needs_close:
                     continue

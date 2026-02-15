@@ -172,13 +172,69 @@ def extract_security_name_from_page(url):
     return ""
 
 
+
+
+def openfigi_name_for_isin(isin):
+    # Fallback resolver when BNP page discovery fails.
+    try:
+        req = Request(
+            "https://api.openfigi.com/v3/mapping",
+            data=json.dumps([{"idType": "ID_ISIN", "idValue": isin}]).encode("utf-8"),
+            headers={
+                "User-Agent": UA,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(req, timeout=25) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return ""
+
+    if not isinstance(payload, list) or not payload:
+        return ""
+    first = payload[0] if isinstance(payload[0], dict) else {}
+    data = first.get("data") or []
+    if not data or not isinstance(data[0], dict):
+        return ""
+
+    candidate = (
+        data[0].get("name")
+        or data[0].get("securityDescription")
+        or data[0].get("ticker")
+        or ""
+    )
+    candidate = normalize_name(candidate)
+    if not candidate:
+        return ""
+    if normalize_isin(candidate) == isin:
+        return ""
+    return candidate
+
 def bnp_find_url_and_name_for_isin(isin):
     discovered = discover_security_url_for_isin(isin)
     if not discovered:
+        fallback_name = openfigi_name_for_isin(isin)
+        if fallback_name:
+            return {
+                "name": fallback_name,
+                "url": "",
+                "source": "openfigi",
+                "category": "",
+            }
         return None
 
     url = discovered.get("url")
     if not url:
+        fallback_name = openfigi_name_for_isin(isin)
+        if fallback_name:
+            return {
+                "name": fallback_name,
+                "url": "",
+                "source": "openfigi",
+                "category": "",
+            }
         return None
 
     try:
@@ -187,10 +243,15 @@ def bnp_find_url_and_name_for_isin(isin):
         name = ""
 
     name = normalize_name(name)
-    if not name:
-        return None
-
-    if normalize_isin(name) == isin:
+    if not name or normalize_isin(name) == isin:
+        fallback_name = openfigi_name_for_isin(isin)
+        if fallback_name:
+            return {
+                "name": fallback_name,
+                "url": url,
+                "source": "openfigi",
+                "category": "",
+            }
         return None
 
     parsed = urlparse(url)

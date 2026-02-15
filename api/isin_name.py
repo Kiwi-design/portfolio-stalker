@@ -109,6 +109,28 @@ def normalize_txn_close_price(value):
     return text
 
 
+def normalize_currency_code(value):
+    code = str(value or "").strip().upper()
+    return code if re.fullmatch(r"[A-Z]{3}", code) else ""
+
+
+def combine_close_and_currency(close_price, currency):
+    price = normalize_txn_close_price(close_price)
+    if not price:
+        return ""
+    code = normalize_currency_code(currency)
+    return f"{price} {code}" if code else price
+
+
+
+
+def extract_currency_from_close_text(value):
+    text = normalize_txn_close_price(value)
+    if not text:
+        return ""
+    m = re.search(r"\b([A-Z]{3})$", text)
+    return normalize_currency_code(m.group(1) if m else "")
+
 def txn_date_older_than_12m(txn_date):
     try:
         d = datetime.strptime(txn_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -190,13 +212,13 @@ def yahoo_symbol_for_isin(isin):
 
     return best_symbol, best_name
 
-def yahoo_closing_price_for_symbol_date(symbol, txn_date):
+def yahoo_closing_quote_for_symbol_date(symbol, txn_date):
     if not txn_date:
-        return ""
+        return "", ""
     try:
         target = datetime.strptime(txn_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except Exception:
-        return "unavailable"
+        return "unavailable", ""
 
     start_ts = int((target - timedelta(days=7)).timestamp())
     end_ts = int((target + timedelta(days=2)).timestamp())
@@ -208,9 +230,10 @@ def yahoo_closing_price_for_symbol_date(symbol, txn_date):
             "period2": end_ts,
         })
     except Exception:
-        return "unavailable"
+        return "unavailable", ""
 
     res0 = ((payload or {}).get("chart", {}).get("result") or [None])[0] or {}
+    currency = normalize_currency_code(((res0.get("meta") or {}).get("currency")))
     timestamps = res0.get("timestamp") or []
     quote0 = ((res0.get("indicators") or {}).get("quote") or [{}])[0]
     closes = quote0.get("close") or []
@@ -223,18 +246,23 @@ def yahoo_closing_price_for_symbol_date(symbol, txn_date):
         rows.append((d, float(close)))
 
     if not rows:
-        return "unavailable"
+        return "unavailable", currency
 
     # Prefer exact date; otherwise use the nearest prior market close.
     exact = [v for d, v in rows if d == txn_date]
     if exact:
-        return f"{exact[0]:.4f}"
+        return f"{exact[0]:.4f}", currency
 
     prior = [(d, v) for d, v in rows if d <= txn_date]
     if prior:
-        return f"{sorted(prior, key=lambda x: x[0])[-1][1]:.4f}"
+        return f"{sorted(prior, key=lambda x: x[0])[-1][1]:.4f}", currency
 
-    return "unavailable"
+    return "unavailable", currency
+
+
+def yahoo_closing_price_for_symbol_date(symbol, txn_date):
+    price, _ = yahoo_closing_quote_for_symbol_date(symbol, txn_date)
+    return price
 
 
 def maybe_parse_float(value):
@@ -468,23 +496,25 @@ def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
                     if close_val is None:
                         continue
 
+                    item_ccy = normalize_currency_code(item.get("ISO_CURRENCY"))
+
                     if item_date == txn_date:
-                        return f"{close_val:.4f}"
+                        return f"{close_val:.4f}", item_ccy
 
                     if item_date <= txn_date:
                         if best_prior is None or item_date > best_prior[0]:
-                            best_prior = (item_date, close_val)
+                            best_prior = (item_date, close_val, item_ccy)
 
     if best_prior is not None:
-        return f"{best_prior[1]:.4f}"
-    return ""
+        return f"{best_prior[1]:.4f}", best_prior[2]
+    return "", ""
 
 def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
     if not txn_date:
-        return ""
-    direct = bnp_marketdata_history_close_for_isin_date(isin, txn_date)
+        return "", ""
+    direct, direct_ccy = bnp_marketdata_history_close_for_isin_date(isin, txn_date)
     if direct:
-        return direct
+        return direct, direct_ccy
 
     base_url = security_url
     if not base_url:
@@ -495,15 +525,15 @@ def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
     if history_url:
         parsed = find_closing_price_via_ajax(history_url, txn_date)
         if parsed and parsed != "unavailable":
-            return parsed
+            return parsed, ""
 
     y_symbol, _ = yahoo_symbol_for_isin(isin)
     if y_symbol:
-        y_close = yahoo_closing_price_for_symbol_date(y_symbol, txn_date)
+        y_close, y_ccy = yahoo_closing_quote_for_symbol_date(y_symbol, txn_date)
         if y_close and y_close != "unavailable":
-            return y_close
+            return y_close, y_ccy
 
-    return "unavailable"
+    return "unavailable", ""
 
 
 def resolve_security_metadata(isin, txn_date=None):
@@ -515,16 +545,35 @@ def resolve_security_metadata(isin, txn_date=None):
     if not name and yahoo_name:
         name = yahoo_name
 
-    close_price = bnp_closing_price_for_isin_date(isin, txn_date, security_url=security_url) if txn_date else ""
+    close_price, close_ccy = bnp_closing_price_for_isin_date(isin, txn_date, security_url=security_url) if txn_date else ("", "")
     if (not close_price or close_price == "unavailable") and txn_date and yahoo_symbol:
-        close_price = yahoo_closing_price_for_symbol_date(yahoo_symbol, txn_date)
+        close_price, close_ccy = yahoo_closing_quote_for_symbol_date(yahoo_symbol, txn_date)
+
+    close_with_ccy = combine_close_and_currency(close_price, close_ccy)
 
     return {
         "name": name,
         "url": security_url,
         "source": (lookup or {}).get("source", "") or ("yahoo" if yahoo_symbol else ""),
         "category": (lookup or {}).get("category", ""),
-        "txn_close_price": normalize_txn_close_price(close_price),
+        "txn_close_price": normalize_txn_close_price(close_with_ccy),
+        "txn_close_currency": normalize_currency_code(close_ccy),
+    }
+
+
+def resolve_symbol_metadata(symbol, txn_date=None):
+    normalized = normalize_symbol(symbol)
+    if not normalized:
+        return {"name": "", "url": "", "source": "", "category": "", "txn_close_price": ""}
+    close_price, close_ccy = yahoo_closing_quote_for_symbol_date(normalized, txn_date) if txn_date else ("", "")
+    close_with_ccy = combine_close_and_currency(close_price, close_ccy)
+    return {
+        "name": yahoo_symbol_name(normalized) or normalized,
+        "url": "",
+        "source": "yahoo",
+        "category": "",
+        "txn_close_price": normalize_txn_close_price(close_with_ccy),
+        "txn_close_currency": normalize_currency_code(close_ccy),
     }
 
 
@@ -929,17 +978,22 @@ class handler(BaseHTTPRequestHandler):
                 old_close = normalize_txn_close_price(row.get("txn_close_price"))
                 is_placeholder_name = normalize_isin(old_name) == row_isin if row_isin else old_name.upper() == row_symbol
                 needs_name = (not old_name) or is_placeholder_name
-                needs_close = (not old_close)
+                old_close_ccy = extract_currency_from_close_text(old_close)
+                needs_close = (not old_close) or (txn_date and not old_close_ccy)
 
                 if not needs_name and not needs_close:
                     continue
 
                 key = (row_symbol, txn_date)
                 if key not in pair_cache:
-                    if row_isin:
-                        meta = resolve_security_metadata(row_isin, txn_date=txn_date)
-                    else:
-                        meta = resolve_symbol_metadata(row_symbol, txn_date=txn_date)
+                    try:
+                        if row_isin:
+                            meta = resolve_security_metadata(row_isin, txn_date=txn_date)
+                        else:
+                            meta = resolve_symbol_metadata(row_symbol, txn_date=txn_date)
+                    except Exception:
+                        meta = {"name": canonical_names.get(row_symbol, ""), "txn_close_price": "unavailable", "txn_close_currency": ""}
+
                     if canonical_names.get(row_symbol):
                         meta["name"] = canonical_names[row_symbol]
                     if meta.get("name"):

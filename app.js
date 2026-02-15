@@ -295,7 +295,7 @@ async function refreshTransactions() {
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
         <td class="num">
           <div>${Number(r.price).toFixed(4)}</div>
-          <div class="txn-close-price">Close @ txn date: <em>${(r.txn_close_price || "unavailable")}</em></div>
+          ${(() => { const parsed = splitTxnCloseAndCurrency(r.txn_close_price); return `<div class="txn-close-price">Close @ txn date${parsed.currency ? ` (${parsed.currency})` : ""}: <em>${parsed.closeText}</em></div>`; })()}
         </td>
         <td>
           <button class="editTx"
@@ -402,6 +402,13 @@ function isLikelyISIN(value) {
 
 function toISODate(d) {
   return d.toISOString().slice(0, 10);
+}
+
+function withTimeout(promise, timeoutMs, timeoutMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs)),
+  ]);
 }
 
 function previousFriday(fromDate = new Date()) {
@@ -898,6 +905,15 @@ async function getCachedSecurityNameForISIN(user_id, symbol) {
 }
 
 
+
+function splitTxnCloseAndCurrency(value) {
+  const text = String(value || "").trim();
+  if (!text || text.toLowerCase() === "unavailable") return { closeText: "unavailable", currency: "" };
+  const m = text.match(/^(.*?)(?:\s+([A-Z]{3}))$/);
+  if (!m) return { closeText: text, currency: "" };
+  return { closeText: (m[1] || "").trim() || text, currency: m[2] || "" };
+}
+
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1095,20 +1111,27 @@ addTxBtn.addEventListener("click", async () => {
     let savedId = editingTxId;
 
     if (!editingTxId) {
-      const { data: inserted, error: insertError } = await supabaseClient
-        .from("transactions")
-        .insert([{ user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price }])
-        .select("id")
-        .single();
+      const { data: inserted, error: insertError } = await withTimeout(
+        supabaseClient
+          .from("transactions")
+          .insert([{ user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price }])
+          .select("id")
+          .single(),
+        15000,
+        "Insert timed out",
+      );
       error = insertError;
       savedId = inserted?.id || null;
     } else {
-      ({ error } = await supabaseClient
-        .from("transactions")
-        .update({ symbol, security_name, txn_close_price, txn_date, side, quantity, price })
-        .eq("id", editingTxId)
-        .eq("user_id", user_id)
-      );
+      ({ error } = await withTimeout(
+        supabaseClient
+          .from("transactions")
+          .update({ symbol, security_name, txn_close_price, txn_date, side, quantity, price })
+          .eq("id", editingTxId)
+          .eq("user_id", user_id),
+        15000,
+        "Update timed out",
+      ));
     }
 
     if (error) {

@@ -441,6 +441,10 @@ def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
     if direct:
         return direct
 
+    direct = bnp_marketdata_history_close_for_isin_date(isin, txn_date)
+    if direct:
+        return direct
+
     base_url = security_url
     if not base_url:
         discovered = discover_security_url_for_isin(isin) or {}

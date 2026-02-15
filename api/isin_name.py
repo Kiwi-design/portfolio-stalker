@@ -57,6 +57,8 @@ def normalize_txn_close_price(value):
     text = str(value).strip()
     if not text:
         return ""
+    if text.lower() in INVALID_NAME_VALUES:
+        return ""
     return text
 
 
@@ -68,53 +70,200 @@ def txn_date_older_than_12m(txn_date):
     return (datetime.now(timezone.utc) - d).days > 366
 
 
-def extract_close_value(payload, txn_date):
-    # Try to find price values near the requested date.
-    d = re.escape(txn_date)
-    patterns = [
-        rf"{d}[^\n\r]{{0,120}}(?:close|closing|closePrice|price|nav)\"?\s*[:=]\s*\"?([0-9]+(?:[\\.,][0-9]+)?)",
-        rf"(?:close|closing|closePrice|price|nav)\"?\s*[:=]\s*\"?([0-9]+(?:[\\.,][0-9]+)?)[^\n\r]{{0,120}}{d}",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, payload, flags=re.IGNORECASE)
-        if m:
-            try:
-                return float(m.group(1).replace(',', '.'))
-            except Exception:
-                pass
+def normalize_payload_date(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(raw[:10], fmt).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", raw)
+    if m:
+        return m.group(1)
+    m = re.search(r"(\d{2})[./-](\d{2})[./-](\d{4})", raw)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+    return ""
+
+
+def maybe_parse_float(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(" ", "")
+    if not text:
+        return None
+    text = text.replace("%", "")
+    if text.count(",") == 1 and text.count(".") >= 1:
+        text = text.replace(".", "").replace(",", ".")
+    else:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def iter_dicts(obj):
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from iter_dicts(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from iter_dicts(v)
+
+
+def extract_close_value_from_json_obj(obj, txn_date):
+    date_keys = ("date", "datum", "tradingDate", "tradeDate", "valuationDate")
+    close_keys = ("close", "closePrice", "closing", "nav", "last", "price", "kurs", "schlusskurs")
+    d = ""
+    for k in date_keys:
+        if k in obj:
+            d = normalize_payload_date(obj.get(k))
+            if d:
+                break
+    if d != txn_date:
+        return None
+    for k in close_keys:
+        if k in obj:
+            val = maybe_parse_float(obj.get(k))
+            if val is not None:
+                return val
     return None
 
 
-def bnp_closing_price_for_isin_date(isin, txn_date):
+def historical_prices_url_from_security_url(security_url):
+    if not security_url:
+        return ""
+    base = security_url.rstrip("/")
+    if base.endswith("/Kurse-und-Handelsplaetze/Historische-Kurse"):
+        return base
+    return f"{base}/Kurse-und-Handelsplaetze/Historische-Kurse"
+
+
+def ajax_price_endpoints_from_historical_url(hist_url, page):
+    candidates = []
+    templates = [x.strip() for x in os.environ.get("BNP_WM_CLOSE_AJAX_URLS", "").split(",") if x.strip()]
+    for t in templates:
+        candidates.append(
+            t.replace("{history_url}", hist_url).replace("{page}", str(page))
+        )
+
+    tail_patterns = [
+        f"{hist_url}/_jcr_content/historicalpricechanges.ajax.json?page={page}",
+        f"{hist_url}/_jcr_content/historicalpricechanges.json?page={page}",
+        f"{hist_url}/_jcr_content/historicalPrices.ajax.json?page={page}",
+        f"{hist_url}/_jcr_content/historicalPrices.json?page={page}",
+        f"{hist_url}.ajax.json?page={page}",
+        f"{hist_url}.json?page={page}",
+    ]
+    candidates.extend(tail_patterns)
+    return candidates
+
+
+def discover_ajax_template_from_history_page(hist_url):
+    headers = {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml",
+        "Referer": f"{BASE_DOMAIN}/web/home",
+    }
+    try:
+        html = fetch_text(hist_url, headers=headers)
+    except Exception:
+        return ""
+
+    m = re.search(r"((?:https?:\\/\\/|\\/)[^\"']*histor[^\"']*ajax[^\"']*json[^\"']*)", html, flags=re.IGNORECASE)
+    if not m:
+        return ""
+    url = unescape(m.group(1)).replace("\/", "/")
+    url = to_absolute_url(url)
+    if "{page}" in url:
+        return url
+    if "page=" in url:
+        return re.sub(r"page=\d+", "page={page}", url)
+    glue = "&" if "?" in url else "?"
+    return f"{url}{glue}page={{page}}"
+
+
+def find_closing_price_via_ajax(history_url, txn_date):
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+        "Referer": history_url,
+    }
+    page_limit = int(os.environ.get("BNP_WM_CLOSE_PAGE_LIMIT", "80"))
+
+    discovered_template = discover_ajax_template_from_history_page(history_url)
+
+    for page in range(1, page_limit + 1):
+        page_urls = []
+        if discovered_template:
+            page_urls.append(discovered_template.replace("{page}", str(page)))
+        page_urls.extend(ajax_price_endpoints_from_historical_url(history_url, page))
+
+        seen = set()
+        page_found_any = False
+        for url in page_urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            try:
+                payload_text = fetch_text(url, headers=headers)
+            except Exception:
+                continue
+            page_found_any = True
+
+            # JSON path first
+            try:
+                payload_json = json.loads(payload_text)
+                for obj in iter_dicts(payload_json):
+                    val = extract_close_value_from_json_obj(obj, txn_date)
+                    if val is not None:
+                        return f"{val:.4f}"
+            except Exception:
+                pass
+
+            # Text fallback
+            d = re.escape(txn_date)
+            patterns = [
+                rf"{d}[^\n\r]{{0,180}}(?:close|closing|closePrice|price|nav|kurs|schlusskurs)\"?\s*[:=]\s*\"?([0-9]+(?:[\\.,][0-9]+)?)",
+                rf"(?:close|closing|closePrice|price|nav|kurs|schlusskurs)\"?\s*[:=]\s*\"?([0-9]+(?:[\\.,][0-9]+)?)[^\n\r]{{0,180}}{d}",
+            ]
+            for pattern in patterns:
+                m = re.search(pattern, payload_text, flags=re.IGNORECASE)
+                if m:
+                    val = maybe_parse_float(m.group(1))
+                    if val is not None:
+                        return f"{val:.4f}"
+
+        # if no endpoint responded on first page at all, likely wrong endpoint family
+        if page == 1 and not page_found_any and not discovered_template:
+            continue
+        # if none responded for later pages, stop paging
+        if page > 1 and not page_found_any:
+            break
+
+    return "unavailable"
+
+
+def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
     if not txn_date:
         return ""
     if txn_date_older_than_12m(txn_date):
         return "unavailable"
 
-    urls = [
-        f"{BASE_DOMAIN}/web/suche?search={quote_plus(isin)}",
-        f"{BASE_DOMAIN}/web/search?search={quote_plus(isin)}",
-        f"{BASE_DOMAIN}/web/suche/autocomplete?query={quote_plus(isin)}",
-    ]
+    base_url = security_url
+    if not base_url:
+        discovered = discover_security_url_for_isin(isin) or {}
+        base_url = discovered.get("url", "")
 
-    extra_templates = [x.strip() for x in os.environ.get("BNP_WM_CLOSE_AJAX_URLS", "").split(",") if x.strip()]
-    for t in extra_templates:
-        urls.append(t.replace("{isin}", quote_plus(isin)).replace("{date}", txn_date))
-
-    headers = {
-        "User-Agent": UA,
-        "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
-        "Referer": f"{BASE_DOMAIN}/web/home",
-    }
-
-    for url in urls:
-        try:
-            payload = fetch_text(url, headers=headers)
-        except Exception:
-            continue
-        val = extract_close_value(payload, txn_date)
-        if val is not None:
-            return f"{val:.4f}"
+    history_url = historical_prices_url_from_security_url(base_url)
+    if history_url:
+        return find_closing_price_via_ajax(history_url, txn_date)
 
     return "unavailable"
 
@@ -122,10 +271,11 @@ def bnp_closing_price_for_isin_date(isin, txn_date):
 def resolve_security_metadata(isin, txn_date=None):
     lookup = bnp_find_url_and_name_for_isin(isin)
     name = normalize_name((lookup or {}).get("name"))
-    close_price = bnp_closing_price_for_isin_date(isin, txn_date) if txn_date else ""
+    security_url = (lookup or {}).get("url", "")
+    close_price = bnp_closing_price_for_isin_date(isin, txn_date, security_url=security_url) if txn_date else ""
     return {
         "name": name,
-        "url": (lookup or {}).get("url", ""),
+        "url": security_url,
         "source": (lookup or {}).get("source", ""),
         "category": (lookup or {}).get("category", ""),
         "txn_close_price": normalize_txn_close_price(close_price),

@@ -80,6 +80,48 @@ def extract_security_url_from_text(payload, isin):
     return ""
 
 
+
+
+def strip_tags(text):
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text or "")).strip()
+
+
+def extract_name_hint_from_text(payload, isin):
+    # Try JSON-style objects containing ISIN and a title/name field.
+    keys = ("title", "name", "label", "securityName", "instrumentName")
+    for key in keys:
+        patterns = [
+            rf'"{key}"\s*:\s*"([^"\n]{{3,200}})"[^\{{\}}]{{0,400}}"{re.escape(isin)}"',
+            rf'"{re.escape(isin)}"[^\{{\}}]{{0,400}}"{key}"\s*:\s*"([^"\n]{{3,200}})"',
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, payload, flags=re.IGNORECASE)
+            if not m:
+                continue
+            name = normalize_name(unescape(m.group(1)).replace('\/', '/'))
+            if name and normalize_isin(name) != isin:
+                return name
+
+    # Try HTML block around the ISIN and pick nearest meaningful text snippet.
+    m_isin = re.search(re.escape(isin), payload, flags=re.IGNORECASE)
+    if m_isin:
+        start = max(0, m_isin.start() - 1400)
+        end = min(len(payload), m_isin.end() + 600)
+        snippet = payload[start:end]
+        text_before = strip_tags(snippet[: max(0, m_isin.start() - start)])
+        candidates = [c.strip() for c in re.split(r"[\n\r]+", text_before) if c.strip()]
+        candidates = [c for c in candidates if len(c) > 6]
+        stop_words = {"wertpapiere", "suche", "etf", "fonds", "aktie"}
+        for c in reversed(candidates[-8:]):
+            lowered = c.lower()
+            if lowered in stop_words:
+                continue
+            name = normalize_name(c)
+            if name and normalize_isin(name) != isin:
+                return name
+
+    return ""
+
 def search_result_pages_for_isin(isin):
     q = quote_plus(isin)
     return [
@@ -110,23 +152,34 @@ def discover_security_url_for_isin(isin):
         "Referer": f"{BASE_DOMAIN}/web/home",
     }
 
+    best_name = ""
+
     for candidate in search_result_pages_for_isin(isin):
         try:
             payload = fetch_text(candidate, headers=headers)
         except Exception:
             continue
+        name_hint = extract_name_hint_from_text(payload, isin)
+        if name_hint and not best_name:
+            best_name = name_hint
         security_url = extract_security_url_from_text(payload, isin)
         if security_url:
-            return {"url": security_url, "source": candidate}
+            return {"url": security_url, "source": candidate, "name_hint": name_hint or best_name}
 
     for candidate in search_json_endpoints_for_isin(isin):
         try:
             payload = fetch_text(candidate, headers=headers)
         except Exception:
             continue
+        name_hint = extract_name_hint_from_text(payload, isin)
+        if name_hint and not best_name:
+            best_name = name_hint
         security_url = extract_security_url_from_text(payload, isin)
         if security_url:
-            return {"url": security_url, "source": candidate}
+            return {"url": security_url, "source": candidate, "name_hint": name_hint or best_name}
+
+    if best_name:
+        return {"url": "", "source": "search-text", "name_hint": best_name}
 
     return None
 
@@ -224,6 +277,15 @@ def bnp_find_url_and_name_for_isin(isin):
                 "category": "",
             }
         return None
+
+    name_hint = normalize_name(discovered.get("name_hint"))
+    if name_hint and normalize_isin(name_hint) != isin:
+        return {
+            "name": name_hint,
+            "url": discovered.get("url", ""),
+            "source": discovered.get("source", ""),
+            "category": "",
+        }
 
     url = discovered.get("url")
     if not url:

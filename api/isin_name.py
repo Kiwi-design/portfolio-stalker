@@ -577,6 +577,20 @@ def resolve_symbol_metadata(symbol, txn_date=None):
     }
 
 
+def resolve_symbol_metadata(symbol, txn_date=None):
+    normalized = normalize_symbol(symbol)
+    if not normalized:
+        return {"name": "", "url": "", "source": "", "category": "", "txn_close_price": ""}
+    close_price = yahoo_closing_price_for_symbol_date(normalized, txn_date) if txn_date else ""
+    return {
+        "name": yahoo_symbol_name(normalized) or normalized,
+        "url": "",
+        "source": "yahoo",
+        "category": "",
+        "txn_close_price": normalize_txn_close_price(close_price),
+    }
+
+
 def to_absolute_url(path_or_url):
     value = (path_or_url or "").strip()
     if not value:
@@ -933,7 +947,7 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             txs = fetch_json(
-                f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=id,symbol,txn_date,security_name,txn_close_price",
+                f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=id,symbol,txn_date,security_name,txn_close_price,price",
                 supa_headers,
             )
 
@@ -991,7 +1005,11 @@ class handler(BaseHTTPRequestHandler):
                 if needs_name and meta.get("name"):
                     update_row["security_name"] = meta["name"]
                 if needs_close:
-                    update_row["txn_close_price"] = meta.get("txn_close_price") or "unavailable"
+                    resolved_close = meta.get("txn_close_price")
+                    if not resolved_close:
+                        fallback_price = maybe_parse_float(row.get("price"))
+                        resolved_close = f"{fallback_price:.4f}" if fallback_price is not None else "unavailable"
+                    update_row["txn_close_price"] = resolved_close
 
                 if len(update_row) > 2:
                     updates.append(update_row)

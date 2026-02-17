@@ -4,8 +4,9 @@ import os
 import re
 from html import unescape
 from urllib.parse import quote_plus, parse_qs, urlparse
-from datetime import datetime, timezone
-from urllib.request import Request, urlopen
+from datetime import datetime, timezone, timedelta
+from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
+import http.cookiejar
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -15,6 +16,12 @@ UA = (
 ISIN_RE = re.compile(r"\b[A-Z]{2}[A-Z0-9]{10}\b")
 INVALID_NAME_VALUES = {"", "null", "none", "n/a", "na", "undefined", "-"}
 BASE_DOMAIN = "https://www.wealthmanagement.bnpparibas.de"
+YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
+YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
+
+_BNP_COOKIE_JAR = http.cookiejar.CookieJar()
+_BNP_OPENER = build_opener(HTTPCookieProcessor(_BNP_COOKIE_JAR))
+_BNP_PRIMED = False
 
 
 def fetch_text(url, headers=None, timeout=25):
@@ -26,6 +33,42 @@ def fetch_text(url, headers=None, timeout=25):
 def fetch_json(url, headers=None, timeout=25):
     return json.loads(fetch_text(url, headers=headers, timeout=timeout))
 
+
+
+
+def bnp_fetch_text(url, headers=None, timeout=25):
+    req = Request(url, headers=headers or {})
+    with _BNP_OPENER.open(req, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def prime_bnp_session():
+    global _BNP_PRIMED
+    if _BNP_PRIMED:
+        return
+    headers = {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        bnp_fetch_text(f"{BASE_DOMAIN}/web/home", headers=headers, timeout=20)
+    except Exception:
+        pass
+    # best-effort cookie bootstrap used by marketdata endpoints
+    try:
+        bnp_fetch_text(
+            f"{BASE_DOMAIN}/web-sec-service/api/cookie/content",
+            headers={"User-Agent": UA, "Accept": "application/json", "Referer": f"{BASE_DOMAIN}/web/home"},
+            timeout=20,
+        )
+    except Exception:
+        pass
+    _BNP_PRIMED = True
+
+
+def bnp_fetch_json(url, headers=None, timeout=25):
+    prime_bnp_session()
+    return json.loads(bnp_fetch_text(url, headers=headers, timeout=timeout))
 
 def read_str(record, keys):
     for key in keys:
@@ -40,6 +83,10 @@ def normalize_isin(value):
         return ""
     m = ISIN_RE.search(str(value).upper())
     return m.group(0) if m else ""
+
+
+def normalize_symbol(value):
+    return str(value or "").strip().upper()
 
 
 def normalize_name(value):
@@ -61,6 +108,28 @@ def normalize_txn_close_price(value):
         return ""
     return text
 
+
+def normalize_currency_code(value):
+    code = str(value or "").strip().upper()
+    return code if re.fullmatch(r"[A-Z]{3}", code) else ""
+
+
+def combine_close_and_currency(close_price, currency):
+    price = normalize_txn_close_price(close_price)
+    if not price:
+        return ""
+    code = normalize_currency_code(currency)
+    return f"{price} {code}" if code else price
+
+
+
+
+def extract_currency_from_close_text(value):
+    text = normalize_txn_close_price(value)
+    if not text:
+        return ""
+    m = re.search(r"\b([A-Z]{3})$", text)
+    return normalize_currency_code(m.group(1) if m else "")
 
 def txn_date_older_than_12m(txn_date):
     try:
@@ -86,6 +155,114 @@ def normalize_payload_date(value):
     if m:
         return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
     return ""
+
+
+def yahoo_chart(symbol, params):
+    query = "&".join([f"{k}={quote_plus(str(v))}" for k, v in params.items()])
+    url = f"{YAHOO_CHART_BASE}{quote_plus(symbol)}?{query}"
+    return fetch_json(
+        url,
+        headers={
+            "User-Agent": UA,
+            "Accept": "application/json",
+        },
+    )
+
+
+def yahoo_symbol_name(symbol):
+    try:
+        payload = yahoo_chart(symbol, {"interval": "1d", "range": "5d"})
+    except Exception:
+        return ""
+    res0 = ((payload or {}).get("chart", {}).get("result") or [None])[0] or {}
+    meta = res0.get("meta") or {}
+    name = meta.get("shortName") or meta.get("longName") or ""
+    return normalize_name(name)
+
+
+
+
+def yahoo_symbol_for_isin(isin):
+    try:
+        payload = fetch_json(
+            f"{YAHOO_SEARCH_URL}?q={quote_plus(isin)}",
+            headers={"User-Agent": UA, "Accept": "application/json"},
+            timeout=20,
+        )
+    except Exception:
+        return "", ""
+
+    quotes = payload.get("quotes") or []
+    best_symbol = ""
+    best_name = ""
+
+    for q in quotes:
+        if not isinstance(q, dict):
+            continue
+        symbol = normalize_symbol(q.get("symbol"))
+        if not symbol:
+            continue
+        name = normalize_name(q.get("shortname") or q.get("longname") or q.get("quoteType") or "")
+        q_isin = normalize_isin(q.get("isin") or "")
+        if q_isin == isin:
+            return symbol, name
+        if not best_symbol:
+            best_symbol = symbol
+            best_name = name
+
+    return best_symbol, best_name
+
+def yahoo_closing_quote_for_symbol_date(symbol, txn_date):
+    if not txn_date:
+        return "", ""
+    try:
+        target = datetime.strptime(txn_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except Exception:
+        return "unavailable", ""
+
+    start_ts = int((target - timedelta(days=7)).timestamp())
+    end_ts = int((target + timedelta(days=2)).timestamp())
+
+    try:
+        payload = yahoo_chart(symbol, {
+            "interval": "1d",
+            "period1": start_ts,
+            "period2": end_ts,
+        })
+    except Exception:
+        return "unavailable", ""
+
+    res0 = ((payload or {}).get("chart", {}).get("result") or [None])[0] or {}
+    currency = normalize_currency_code(((res0.get("meta") or {}).get("currency")))
+    timestamps = res0.get("timestamp") or []
+    quote0 = ((res0.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = quote0.get("close") or []
+
+    rows = []
+    for ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+        d = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        rows.append((d, float(close)))
+
+    if not rows:
+        return "unavailable", currency
+
+    # Prefer exact date; otherwise use the nearest prior market close.
+    exact = [v for d, v in rows if d == txn_date]
+    if exact:
+        return f"{exact[0]:.4f}", currency
+
+    prior = [(d, v) for d, v in rows if d <= txn_date]
+    if prior:
+        return f"{sorted(prior, key=lambda x: x[0])[-1][1]:.4f}", currency
+
+    return "unavailable", currency
+
+
+def yahoo_closing_price_for_symbol_date(symbol, txn_date):
+    price, _ = yahoo_closing_quote_for_symbol_date(symbol, txn_date)
+    return price
 
 
 def maybe_parse_float(value):
@@ -199,7 +376,7 @@ def find_closing_price_via_ajax(history_url, txn_date):
 
     discovered_template = discover_ajax_template_from_history_page(history_url)
 
-    for page in range(1, page_limit + 1):
+    for page in range(0, page_limit):
         page_urls = []
         if discovered_template:
             page_urls.append(discovered_template.replace("{page}", str(page)))
@@ -241,20 +418,103 @@ def find_closing_price_via_ajax(history_url, txn_date):
                         return f"{val:.4f}"
 
         # if no endpoint responded on first page at all, likely wrong endpoint family
-        if page == 1 and not page_found_any and not discovered_template:
+        if page == 0 and not page_found_any and not discovered_template:
             continue
         # if none responded for later pages, stop paging
-        if page > 1 and not page_found_any:
+        if page > 0 and not page_found_any:
             break
 
     return "unavailable"
 
 
+
+
+def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/json,text/plain;q=0.9,*/*;q=0.8",
+        "Referer": f"{BASE_DOMAIN}/web/home",
+    }
+    page_limit = int(os.environ.get("BNP_WM_CLOSE_PAGE_LIMIT", "80"))
+    market_types = ["funds", "stocks", "bonds", "etfs", "certificates", "indices"]
+    basic_fields = ["BasicV2", "BasicV1"]
+
+    best_prior = None
+
+    for market_type in market_types:
+        exchanges = []
+        for basic in basic_fields:
+            meta_url = (
+                f"{BASE_DOMAIN}/web-financialinfo-service/api/marketdata/{market_type}"
+                f"?id={quote_plus(isin)}&field={basic}&field=ExchangesV2&field=ConditionsV1"
+            )
+            try:
+                payload = bnp_fetch_json(meta_url, headers=headers)
+            except Exception:
+                continue
+            if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+                continue
+            exchanges = payload[0].get("ExchangesV2") or []
+            if exchanges:
+                break
+
+        if not exchanges:
+            continue
+
+        for exchange in exchanges:
+            consors_id = str(exchange.get("CONSORS_ID") or "").strip()
+            if not consors_id:
+                continue
+            for page in range(0, page_limit):
+                hist_url = (
+                    f"{BASE_DOMAIN}/web-financialinfo-service/api/marketdata/{market_type}"
+                    f"?id={quote_plus(consors_id)}&field=HistoryV1&page={page}&range=-5000&resolution=1D"
+                )
+                try:
+                    hist_payload = bnp_fetch_json(hist_url, headers=headers)
+                except Exception:
+                    if page > 0:
+                        break
+                    continue
+                if not isinstance(hist_payload, list) or not hist_payload or not isinstance(hist_payload[0], dict):
+                    if page > 0:
+                        break
+                    continue
+                items = (hist_payload[0].get("HistoryV1") or {}).get("ITEMS") or []
+                if not items:
+                    if page > 0:
+                        break
+                    continue
+
+                for item in items:
+                    item_date = normalize_payload_date(item.get("DATETIME_LAST") or item.get("date") or "")
+                    if not item_date:
+                        continue
+                    close_val = maybe_parse_float(item.get("LAST"))
+                    if close_val is None:
+                        close_val = maybe_parse_float(item.get("close"))
+                    if close_val is None:
+                        continue
+
+                    item_ccy = normalize_currency_code(item.get("ISO_CURRENCY"))
+
+                    if item_date == txn_date:
+                        return f"{close_val:.4f}", item_ccy
+
+                    if item_date <= txn_date:
+                        if best_prior is None or item_date > best_prior[0]:
+                            best_prior = (item_date, close_val, item_ccy)
+
+    if best_prior is not None:
+        return f"{best_prior[1]:.4f}", best_prior[2]
+    return "", ""
+
 def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
     if not txn_date:
-        return ""
-    if txn_date_older_than_12m(txn_date):
-        return "unavailable"
+        return "", ""
+    direct, direct_ccy = bnp_marketdata_history_close_for_isin_date(isin, txn_date)
+    if direct:
+        return direct, direct_ccy
 
     base_url = security_url
     if not base_url:
@@ -263,22 +523,57 @@ def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
 
     history_url = historical_prices_url_from_security_url(base_url)
     if history_url:
-        return find_closing_price_via_ajax(history_url, txn_date)
+        parsed = find_closing_price_via_ajax(history_url, txn_date)
+        if parsed and parsed != "unavailable":
+            return parsed, ""
 
-    return "unavailable"
+    y_symbol, _ = yahoo_symbol_for_isin(isin)
+    if y_symbol:
+        y_close, y_ccy = yahoo_closing_quote_for_symbol_date(y_symbol, txn_date)
+        if y_close and y_close != "unavailable":
+            return y_close, y_ccy
+
+    return "unavailable", ""
 
 
 def resolve_security_metadata(isin, txn_date=None):
     lookup = bnp_find_url_and_name_for_isin(isin)
     name = normalize_name((lookup or {}).get("name"))
     security_url = (lookup or {}).get("url", "")
-    close_price = bnp_closing_price_for_isin_date(isin, txn_date, security_url=security_url) if txn_date else ""
+
+    yahoo_symbol, yahoo_name = yahoo_symbol_for_isin(isin)
+    if not name and yahoo_name:
+        name = yahoo_name
+
+    close_price, close_ccy = bnp_closing_price_for_isin_date(isin, txn_date, security_url=security_url) if txn_date else ("", "")
+    if (not close_price or close_price == "unavailable") and txn_date and yahoo_symbol:
+        close_price, close_ccy = yahoo_closing_quote_for_symbol_date(yahoo_symbol, txn_date)
+
+    close_with_ccy = combine_close_and_currency(close_price, close_ccy)
+
     return {
         "name": name,
         "url": security_url,
-        "source": (lookup or {}).get("source", ""),
+        "source": (lookup or {}).get("source", "") or ("yahoo" if yahoo_symbol else ""),
         "category": (lookup or {}).get("category", ""),
-        "txn_close_price": normalize_txn_close_price(close_price),
+        "txn_close_price": normalize_txn_close_price(close_with_ccy),
+        "txn_close_currency": normalize_currency_code(close_ccy),
+    }
+
+
+def resolve_symbol_metadata(symbol, txn_date=None):
+    normalized = normalize_symbol(symbol)
+    if not normalized:
+        return {"name": "", "url": "", "source": "", "category": "", "txn_close_price": ""}
+    close_price, close_ccy = yahoo_closing_quote_for_symbol_date(normalized, txn_date) if txn_date else ("", "")
+    close_with_ccy = combine_close_and_currency(close_price, close_ccy)
+    return {
+        "name": yahoo_symbol_name(normalized) or normalized,
+        "url": "",
+        "source": "yahoo",
+        "category": "",
+        "txn_close_price": normalize_txn_close_price(close_with_ccy),
+        "txn_close_currency": normalize_currency_code(close_ccy),
     }
 
 
@@ -617,6 +912,7 @@ class handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             q = parse_qs(parsed.query)
             isin = normalize_isin((q.get("isin") or [""])[0])
+            symbol = normalize_symbol((q.get("symbol") or [""])[0])
 
             if isin:
                 txn_date = (q.get("txn_date") or [""])[0]
@@ -627,6 +923,15 @@ class handler(BaseHTTPRequestHandler):
                 self._send(200, {"status": "ok", "isin": isin, **meta})
                 return
 
+            if symbol:
+                txn_date = (q.get("txn_date") or [""])[0]
+                meta = resolve_symbol_metadata(symbol, txn_date=txn_date)
+                if not meta.get("name"):
+                    self._send(404, {"status": "error", "message": f"No security name found for {symbol}"})
+                    return
+                self._send(200, {"status": "ok", "symbol": symbol, **meta})
+                return
+
             txs = fetch_json(
                 f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=id,symbol,txn_date,security_name,txn_close_price",
                 supa_headers,
@@ -634,35 +939,51 @@ class handler(BaseHTTPRequestHandler):
 
             canonical_names = {}
             for row in txs:
-                row_isin = normalize_isin(row.get("symbol"))
+                row_symbol = normalize_symbol(row.get("symbol"))
                 old_name = normalize_name(row.get("security_name"))
-                if row_isin and old_name and normalize_isin(old_name) != row_isin:
-                    canonical_names[row_isin] = old_name
+                if not row_symbol or not old_name:
+                    continue
+                row_isin = normalize_isin(row_symbol)
+                if row_isin:
+                    if normalize_isin(old_name) != row_isin:
+                        canonical_names[row_symbol] = old_name
+                elif old_name.upper() != row_symbol:
+                    canonical_names[row_symbol] = old_name
 
             pair_cache = {}
             updates = []
             for row in txs:
                 row_id = row.get("id")
-                row_isin = normalize_isin(row.get("symbol"))
+                row_symbol = normalize_symbol(row.get("symbol"))
                 txn_date = str(row.get("txn_date") or "")
-                if not row_id or not row_isin:
+                if not row_id or not row_symbol:
                     continue
 
+                row_isin = normalize_isin(row_symbol)
                 old_name = normalize_name(row.get("security_name"))
                 old_close = normalize_txn_close_price(row.get("txn_close_price"))
-                needs_name = (not old_name) or (normalize_isin(old_name) == row_isin)
-                needs_close = (not old_close) and (not txn_date_older_than_12m(txn_date))
+                is_placeholder_name = normalize_isin(old_name) == row_isin if row_isin else old_name.upper() == row_symbol
+                needs_name = (not old_name) or is_placeholder_name
+                old_close_ccy = extract_currency_from_close_text(old_close)
+                needs_close = (not old_close) or (txn_date and not old_close_ccy)
 
                 if not needs_name and not needs_close:
                     continue
 
-                key = (row_isin, txn_date)
+                key = (row_symbol, txn_date)
                 if key not in pair_cache:
-                    meta = resolve_security_metadata(row_isin, txn_date=txn_date)
-                    if canonical_names.get(row_isin):
-                        meta["name"] = canonical_names[row_isin]
+                    try:
+                        if row_isin:
+                            meta = resolve_security_metadata(row_isin, txn_date=txn_date)
+                        else:
+                            meta = resolve_symbol_metadata(row_symbol, txn_date=txn_date)
+                    except Exception:
+                        meta = {"name": canonical_names.get(row_symbol, ""), "txn_close_price": "unavailable", "txn_close_currency": ""}
+
+                    if canonical_names.get(row_symbol):
+                        meta["name"] = canonical_names[row_symbol]
                     if meta.get("name"):
-                        canonical_names[row_isin] = meta["name"]
+                        canonical_names[row_symbol] = meta["name"]
                     pair_cache[key] = meta
                 meta = pair_cache[key]
 
@@ -675,24 +996,43 @@ class handler(BaseHTTPRequestHandler):
                 if len(update_row) > 2:
                     updates.append(update_row)
 
+            applied_updates = 0
+            update_errors = []
             if updates:
-                req = Request(
-                    f"{supabase_url}/rest/v1/transactions?on_conflict=id",
-                    data=json.dumps(updates).encode("utf-8"),
-                    headers={
-                        **supa_headers,
-                        "Content-Type": "application/json",
-                        "Prefer": "resolution=merge-duplicates,return=minimal",
-                    },
-                    method="POST",
-                )
-                with urlopen(req, timeout=30):
-                    pass
+                # Apply row-by-row so a single malformed record does not fail whole sync.
+                for row in updates:
+                    row_id = row.get("id")
+                    if row_id is None:
+                        continue
+                    payload = dict(row)
+                    payload.pop("id", None)
+                    if not payload:
+                        continue
+                    req = Request(
+                        f"{supabase_url}/rest/v1/transactions?id=eq.{quote_plus(str(row_id))}",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={
+                            **supa_headers,
+                            "Content-Type": "application/json",
+                            "Prefer": "return=minimal",
+                        },
+                        method="PATCH",
+                    )
+                    try:
+                        with urlopen(req, timeout=30):
+                            applied_updates += 1
+                    except Exception as e:
+                        if len(update_errors) < 10:
+                            update_errors.append(f"id={row_id}: {e}")
 
-            self._send(200, {
+            response = {
                 "status": "ok",
-                "updated_rows": len(updates),
-                "resolved_symbols": resolved,
-            })
+                "updated_rows": applied_updates,
+                "resolved_symbols": len(pair_cache),
+                "candidate_updates": len(updates),
+            }
+            if update_errors:
+                response["warnings"] = update_errors
+            self._send(200, response)
         except Exception as e:
             self._send(500, {"status": "error", "message": str(e)})

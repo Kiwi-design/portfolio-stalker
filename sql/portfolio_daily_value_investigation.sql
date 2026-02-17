@@ -51,7 +51,7 @@ latest_prices as (
   from holdings h
   left join lateral (
     select p.date, p.close_native, p.currency
-    from public.prices_daily p
+    from public.prices p
     where upper(trim(p.symbol)) = h.symbol
       and p.date <= h.valuation_date
       and coalesce(p.source, '') <> 'synthetic_anchor'

@@ -125,7 +125,7 @@ class handler(BaseHTTPRequestHandler):
             one_year_ago = (now_utc - timedelta(days=365)).strftime("%Y-%m-%d")
             price_cache = {}  # symbol -> {date -> row}
             fx_cache = {}     # ccy -> {date -> row}
-            table_cache_enabled = {"prices": True, "fx_daily": True}
+            table_cache_enabled = {"prices": True, "fx_daily": True, "asset_event_prices": True, "portfolio_daily_value": True}
             ensured_symbol_min = {}
             ensured_fx_min = {}
 
@@ -350,7 +350,108 @@ class handler(BaseHTTPRequestHandler):
                 return len(out_rows)
 
 
+
+            def upsert_in_chunks(table, rows, on_conflict, chunk_size=500):
+                if not rows:
+                    return
+                for i in range(0, len(rows), chunk_size):
+                    supa_upsert(table, rows[i:i + chunk_size], on_conflict)
+
+            def sync_asset_event_prices(norm_rows, today_iso):
+                if not norm_rows:
+                    return {"grid_rows": 0, "updated_rows": 0, "symbols": 0, "dates": 0}
+
+                symbols = sorted({t["symbol"] for t in norm_rows if t.get("symbol")})
+                dates = set(build_valuation_events(norm_rows, today_iso))
+                dates.update({t["txn_date"] for t in norm_rows if t.get("txn_date")})
+
+                pvd_rows = supa_get(
+                    "portfolio_daily_value",
+                    {
+                        "user_id": f"eq.{user_id}",
+                        "select": "valuation_date",
+                        "order": "valuation_date.asc",
+                        "limit": "5000",
+                    },
+                )
+                for r in (pvd_rows or []):
+                    d = str(r.get("valuation_date") or "")
+                    if d:
+                        dates.add(d)
+
+                all_dates = sorted(d for d in dates if d)
+                if not symbols or not all_dates:
+                    return {"grid_rows": 0, "updated_rows": 0, "symbols": len(symbols), "dates": len(all_dates)}
+
+                grid_rows = []
+                for sym in symbols:
+                    for d in all_dates:
+                        grid_rows.append({
+                            "user_id": user_id,
+                            "symbol": sym,
+                            "valuation_date": d,
+                            "price_status": "pending",
+                            "updated_at": now_utc.isoformat(),
+                        })
+                upsert_in_chunks("asset_event_prices", grid_rows, "user_id,symbol,valuation_date")
+
+                existing_rows = supa_get(
+                    "asset_event_prices",
+                    {
+                        "user_id": f"eq.{user_id}",
+                        "select": "symbol,valuation_date,close_price_text,price_status",
+                        "limit": "50000",
+                    },
+                )
+                existing = {
+                    (str(r.get("symbol") or "").upper(), str(r.get("valuation_date") or "")): r
+                    for r in (existing_rows or [])
+                }
+
+                resolver_cache = {}
+                updates = []
+                for sym in symbols:
+                    for d in all_dates:
+                        cur = existing.get((sym, d), {})
+                        cur_text = str(cur.get("close_price_text") or "").strip()
+                        cur_status = str(cur.get("price_status") or "").strip().lower()
+                        if cur_text and cur_text.lower() != "unavailable" and cur_status == "resolved":
+                            continue
+
+                        key = (sym, d)
+                        if key not in resolver_cache:
+                            isin = normalize_isin(sym)
+                            try:
+                                meta = resolve_security_metadata(isin, txn_date=d) if isin else resolve_symbol_metadata(sym, txn_date=d)
+                            except Exception:
+                                meta = {}
+                            raw = str((meta or {}).get("txn_close_price") or "").strip() or "unavailable"
+                            val, ccy = parse_close_price_and_currency(raw)
+                            resolver_cache[key] = (raw, val, ccy)
+
+                        raw, val, ccy = resolver_cache[key]
+                        updates.append({
+                            "user_id": user_id,
+                            "symbol": sym,
+                            "valuation_date": d,
+                            "close_price_text": raw,
+                            "close_native": val,
+                            "currency": ccy or None,
+                            "source": "bnp_ajax",
+                            "price_status": "resolved" if val is not None else "unavailable",
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        })
+
+                upsert_in_chunks("asset_event_prices", updates, "user_id,symbol,valuation_date")
+                return {
+                    "grid_rows": len(grid_rows),
+                    "updated_rows": len(updates),
+                    "symbols": len(symbols),
+                    "dates": len(all_dates),
+                }
+
             # Price/FX caches backed by Supabase
+            asset_event_stats = sync_asset_event_prices(norm, today)
             prices_rows_written = rebuild_prices_events_table(norm, today)
 
             def normalize_price_and_ccy(raw_ccy, raw_price):
@@ -821,6 +922,10 @@ class handler(BaseHTTPRequestHandler):
                 "errors": errors,
                 "prices_rows_written": prices_rows_written,
                 "price_symbols_seen": len({t["symbol"] for t in norm}),
+                "asset_event_prices_grid_rows": asset_event_stats.get("grid_rows", 0),
+                "asset_event_prices_updated_rows": asset_event_stats.get("updated_rows", 0),
+                "asset_event_prices_symbols": asset_event_stats.get("symbols", 0),
+                "asset_event_prices_dates": asset_event_stats.get("dates", 0),
             })
 
         except Exception as e:

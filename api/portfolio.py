@@ -128,10 +128,7 @@ class handler(BaseHTTPRequestHandler):
             table_cache_enabled = {"prices": True, "fx_daily": True, "asset_event_prices": True, "portfolio_daily_value": True}
             ensured_symbol_min = {}
             ensured_fx_min = {}
-<<<<<<< codex/find-urls-for-given-isins-7b0nbc
             write_warnings = []
-=======
->>>>>>> main
 
             def supa_get(table, params):
                 if not table_cache_enabled.get(table, True):
@@ -360,7 +357,6 @@ class handler(BaseHTTPRequestHandler):
 
             def upsert_in_chunks(table, rows, on_conflict, chunk_size=500):
                 if not rows:
-<<<<<<< codex/find-urls-for-given-isins-7b0nbc
                     return {"ok": 0, "failed": 0}
                 ok = 0
                 failed = 0
@@ -403,11 +399,6 @@ class handler(BaseHTTPRequestHandler):
                     if len(write_warnings) < 20:
                         write_warnings.append(f"patch asset_event_prices failed ({row.get('symbol')} {row.get('valuation_date')}): {e}")
                     return False
-=======
-                    return
-                for i in range(0, len(rows), chunk_size):
-                    supa_upsert(table, rows[i:i + chunk_size], on_conflict)
->>>>>>> main
 
             def sync_asset_event_prices(norm_rows, today_iso):
                 if not norm_rows:
@@ -445,11 +436,7 @@ class handler(BaseHTTPRequestHandler):
                             "price_status": "pending",
                             "updated_at": now_utc.isoformat(),
                         })
-<<<<<<< codex/find-urls-for-given-isins-7b0nbc
                 grid_write_stats = upsert_in_chunks("asset_event_prices", grid_rows, "user_id,symbol,valuation_date")
-=======
-                upsert_in_chunks("asset_event_prices", grid_rows, "user_id,symbol,valuation_date")
->>>>>>> main
 
                 existing_rows = supa_get(
                     "asset_event_prices",
@@ -498,7 +485,6 @@ class handler(BaseHTTPRequestHandler):
                             "updated_at": datetime.now(timezone.utc).isoformat(),
                         })
 
-<<<<<<< codex/find-urls-for-given-isins-7b0nbc
                 updated_ok = 0
                 updated_failed = 0
                 for row in updates:
@@ -514,12 +500,6 @@ class handler(BaseHTTPRequestHandler):
                     "updated_failed": updated_failed,
                     "grid_upsert_ok": grid_write_stats.get("ok", 0),
                     "grid_upsert_failed": grid_write_stats.get("failed", 0),
-=======
-                upsert_in_chunks("asset_event_prices", updates, "user_id,symbol,valuation_date")
-                return {
-                    "grid_rows": len(grid_rows),
-                    "updated_rows": len(updates),
->>>>>>> main
                     "symbols": len(symbols),
                     "dates": len(all_dates),
                 }
@@ -998,7 +978,6 @@ class handler(BaseHTTPRequestHandler):
                 "price_symbols_seen": len({t["symbol"] for t in norm}),
                 "asset_event_prices_grid_rows": asset_event_stats.get("grid_rows", 0),
                 "asset_event_prices_updated_rows": asset_event_stats.get("updated_rows", 0),
-<<<<<<< codex/find-urls-for-given-isins-7b0nbc
                 "asset_event_prices_updated_ok": asset_event_stats.get("updated_ok", 0),
                 "asset_event_prices_updated_failed": asset_event_stats.get("updated_failed", 0),
                 "asset_event_prices_grid_upsert_ok": asset_event_stats.get("grid_upsert_ok", 0),
@@ -1006,10 +985,6 @@ class handler(BaseHTTPRequestHandler):
                 "asset_event_prices_symbols": asset_event_stats.get("symbols", 0),
                 "asset_event_prices_dates": asset_event_stats.get("dates", 0),
                 "write_warnings": write_warnings,
-=======
-                "asset_event_prices_symbols": asset_event_stats.get("symbols", 0),
-                "asset_event_prices_dates": asset_event_stats.get("dates", 0),
->>>>>>> main
             })
 
         except Exception as e:

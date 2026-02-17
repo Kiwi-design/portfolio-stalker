@@ -368,6 +368,23 @@ class handler(BaseHTTPRequestHandler):
                         failed += len(chunk)
                 return {"ok": ok, "failed": failed}
 
+            def upsert_asset_event_price_rows(rows, chunk_size=500):
+                if not rows:
+                    return {"ok": 0, "failed": 0}
+                ok = 0
+                failed = 0
+                for i in range(0, len(rows), chunk_size):
+                    chunk = rows[i:i + chunk_size]
+                    if supa_upsert("asset_event_prices", chunk, "user_id,symbol,valuation_date"):
+                        ok += len(chunk)
+                    else:
+                        failed += len(chunk)
+                        if len(write_warnings) < 20:
+                            write_warnings.append(
+                                f"upsert asset_event_prices update chunk failed (size={len(chunk)})"
+                            )
+                return {"ok": ok, "failed": failed}
+
             def sync_asset_event_prices(norm_rows, today_iso):
                 if not norm_rows:
                     return {"grid_rows": 0, "updated_rows": 0, "symbols": 0, "dates": 0}
@@ -453,7 +470,9 @@ class handler(BaseHTTPRequestHandler):
                             "updated_at": datetime.now(timezone.utc).isoformat(),
                         })
 
-                update_write_stats = upsert_in_chunks("asset_event_prices", updates, "user_id,symbol,valuation_date")
+                update_write_stats = upsert_asset_event_price_rows(updates)
+                updated_ok = update_write_stats.get("ok", 0)
+                updated_failed = update_write_stats.get("failed", 0)
 
                 return {
                     "grid_rows": len(grid_rows),

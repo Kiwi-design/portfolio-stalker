@@ -529,8 +529,8 @@ class handler(BaseHTTPRequestHandler):
                 return {
                     "grid_rows": len(grid_rows),
                     "updated_rows": len(updates),
-                    "updated_ok": updated_ok,
-                    "updated_failed": updated_failed,
+                    "updated_ok": update_write_stats.get("ok", 0),
+                    "updated_failed": update_write_stats.get("failed", 0),
                     "grid_upsert_ok": grid_write_stats.get("ok", 0),
                     "grid_upsert_failed": grid_write_stats.get("failed", 0),
                     "symbols": len(symbols),

@@ -368,22 +368,70 @@ class handler(BaseHTTPRequestHandler):
                         failed += len(chunk)
                 return {"ok": ok, "failed": failed}
 
-            def upsert_asset_event_price_rows(rows, chunk_size=500):
-                if not rows:
-                    return {"ok": 0, "failed": 0}
-                ok = 0
-                failed = 0
-                for i in range(0, len(rows), chunk_size):
-                    chunk = rows[i:i + chunk_size]
-                    if supa_upsert("asset_event_prices", chunk, "user_id,symbol,valuation_date"):
-                        ok += len(chunk)
-                    else:
-                        failed += len(chunk)
-                        if len(write_warnings) < 20:
-                            write_warnings.append(
-                                f"upsert asset_event_prices update chunk failed (size={len(chunk)})"
-                            )
-                return {"ok": ok, "failed": failed}
+            def write_asset_event_price_row(row):
+                if not table_cache_enabled.get("asset_event_prices", True):
+                    return False
+
+                user_q = quote(str(row.get("user_id") or ""), safe="")
+                sym_q = quote(str(row.get("symbol") or ""), safe="")
+                date_q = quote(str(row.get("valuation_date") or ""), safe="")
+                payload = {
+                    "close_price_text": row.get("close_price_text"),
+                    "close_native": row.get("close_native"),
+                    "currency": row.get("currency"),
+                    "source": row.get("source"),
+                    "price_status": row.get("price_status"),
+                    "updated_at": row.get("updated_at"),
+                }
+
+                patch_req = Request(
+                    f"{supabase_url}/rest/v1/asset_event_prices?user_id=eq.{user_q}&symbol=eq.{sym_q}&valuation_date=eq.{date_q}",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        **supa_rest_headers,
+                        "Content-Type": "application/json",
+                        "Prefer": "return=representation",
+                    },
+                    method="PATCH",
+                )
+
+                try:
+                    with urlopen(patch_req, timeout=20) as r:
+                        body = r.read().decode("utf-8")
+                    patched = json.loads(body) if body else []
+                    if isinstance(patched, list) and len(patched) > 0:
+                        return True
+                except Exception as e:
+                    if len(write_warnings) < 20:
+                        write_warnings.append(
+                            f"patch asset_event_prices failed ({row.get('symbol')} {row.get('valuation_date')}): {e}"
+                        )
+
+                insert_row = {
+                    "user_id": row.get("user_id"),
+                    "symbol": row.get("symbol"),
+                    "valuation_date": row.get("valuation_date"),
+                    **payload,
+                }
+                ins_req = Request(
+                    f"{supabase_url}/rest/v1/asset_event_prices",
+                    data=json.dumps([insert_row]).encode("utf-8"),
+                    headers={
+                        **supa_rest_headers,
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    method="POST",
+                )
+                try:
+                    with urlopen(ins_req, timeout=20):
+                        return True
+                except Exception as e:
+                    if len(write_warnings) < 20:
+                        write_warnings.append(
+                            f"insert asset_event_prices failed ({row.get('symbol')} {row.get('valuation_date')}): {e}"
+                        )
+                    return False
 
             def sync_asset_event_prices(norm_rows, today_iso):
                 if not norm_rows:
@@ -470,9 +518,13 @@ class handler(BaseHTTPRequestHandler):
                             "updated_at": datetime.now(timezone.utc).isoformat(),
                         })
 
-                update_write_stats = upsert_asset_event_price_rows(updates)
-                updated_ok = update_write_stats.get("ok", 0)
-                updated_failed = update_write_stats.get("failed", 0)
+                updated_ok = 0
+                updated_failed = 0
+                for row in updates:
+                    if write_asset_event_price_row(row):
+                        updated_ok += 1
+                    else:
+                        updated_failed += 1
 
                 return {
                     "grid_rows": len(grid_rows),

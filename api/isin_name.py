@@ -3,7 +3,7 @@ import json
 import os
 import re
 from html import unescape
-from urllib.parse import quote_plus, parse_qs, urlparse
+from urllib.parse import quote_plus, parse_qs, urlparse, unquote
 from datetime import datetime, timezone, timedelta
 from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
 import http.cookiejar
@@ -429,6 +429,74 @@ def find_closing_price_via_ajax(history_url, txn_date):
 
 
 
+def _extract_consors_ids(meta_payload):
+    ids = []
+    seen = set()
+    for obj in iter_dicts(meta_payload):
+        if not isinstance(obj, dict):
+            continue
+        for key in ("CONSORS_ID", "consorsId", "consors_id", "id", "ID"):
+            raw = obj.get(key)
+            val = str(raw or "").strip()
+            if not val:
+                continue
+            if val.startswith("_") or val.isdigit():
+                if val not in seen:
+                    seen.add(val)
+                    ids.append(val)
+    return ids
+
+
+def _scan_marketdata_history(market_type, instrument_ids, txn_date, headers, page_limit=80):
+    best_prior = None
+    for instrument_id in instrument_ids:
+        for page in range(0, page_limit):
+            hist_url = (
+                f"{BASE_DOMAIN}/web-financialinfo-service/api/marketdata/{market_type}"
+                f"?id={quote_plus(str(instrument_id))}&field=HistoryV1&page={page}&range=-5000&resolution=1D"
+            )
+            try:
+                hist_payload = bnp_fetch_json(hist_url, headers=headers)
+            except Exception:
+                if page > 0:
+                    break
+                continue
+
+            if not isinstance(hist_payload, list) or not hist_payload or not isinstance(hist_payload[0], dict):
+                if page > 0:
+                    break
+                continue
+
+            items = (hist_payload[0].get("HistoryV1") or {}).get("ITEMS") or []
+            if not items:
+                if page > 0:
+                    break
+                continue
+
+            for item in items:
+                item_date = normalize_payload_date(item.get("DATETIME_LAST") or item.get("date") or "")
+                if not item_date:
+                    continue
+                close_val = maybe_parse_float(item.get("LAST"))
+                if close_val is None:
+                    close_val = maybe_parse_float(item.get("close"))
+                if close_val is None:
+                    continue
+
+                item_ccy = normalize_currency_code(item.get("ISO_CURRENCY"))
+
+                if item_date == txn_date:
+                    return f"{close_val:.4f}", item_ccy
+
+                if item_date <= txn_date:
+                    if best_prior is None or item_date > best_prior[0]:
+                        best_prior = (item_date, close_val, item_ccy)
+
+    if best_prior is not None:
+        return f"{best_prior[1]:.4f}", best_prior[2]
+    return "", ""
+
+
 def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
     headers = {
         "User-Agent": UA,
@@ -439,10 +507,20 @@ def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
     market_types = ["funds", "stocks", "bonds", "etfs", "certificates", "indices"]
     basic_fields = ["BasicV2", "BasicV1"]
 
-    best_prior = None
-
     for market_type in market_types:
-        exchanges = []
+        # First, try history directly by ISIN (works for some instruments/endpoints).
+        direct_close, direct_ccy = _scan_marketdata_history(
+            market_type,
+            [isin],
+            txn_date,
+            headers,
+            page_limit=page_limit,
+        )
+        if direct_close:
+            return direct_close, direct_ccy
+
+        consors_ids = []
+        seen_ids = set()
         for basic in basic_fields:
             meta_url = (
                 f"{BASE_DOMAIN}/web-financialinfo-service/api/marketdata/{market_type}"
@@ -452,62 +530,28 @@ def bnp_marketdata_history_close_for_isin_date(isin, txn_date):
                 payload = bnp_fetch_json(meta_url, headers=headers)
             except Exception:
                 continue
-            if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
-                continue
-            exchanges = payload[0].get("ExchangesV2") or []
-            if exchanges:
-                break
 
-        if not exchanges:
+            ids = _extract_consors_ids(payload)
+            for cid in ids:
+                if cid not in seen_ids:
+                    seen_ids.add(cid)
+                    consors_ids.append(cid)
+
+        if not consors_ids:
             continue
 
-        for exchange in exchanges:
-            consors_id = str(exchange.get("CONSORS_ID") or "").strip()
-            if not consors_id:
-                continue
-            for page in range(0, page_limit):
-                hist_url = (
-                    f"{BASE_DOMAIN}/web-financialinfo-service/api/marketdata/{market_type}"
-                    f"?id={quote_plus(consors_id)}&field=HistoryV1&page={page}&range=-5000&resolution=1D"
-                )
-                try:
-                    hist_payload = bnp_fetch_json(hist_url, headers=headers)
-                except Exception:
-                    if page > 0:
-                        break
-                    continue
-                if not isinstance(hist_payload, list) or not hist_payload or not isinstance(hist_payload[0], dict):
-                    if page > 0:
-                        break
-                    continue
-                items = (hist_payload[0].get("HistoryV1") or {}).get("ITEMS") or []
-                if not items:
-                    if page > 0:
-                        break
-                    continue
+        close_price, close_ccy = _scan_marketdata_history(
+            market_type,
+            consors_ids,
+            txn_date,
+            headers,
+            page_limit=page_limit,
+        )
+        if close_price:
+            return close_price, close_ccy
 
-                for item in items:
-                    item_date = normalize_payload_date(item.get("DATETIME_LAST") or item.get("date") or "")
-                    if not item_date:
-                        continue
-                    close_val = maybe_parse_float(item.get("LAST"))
-                    if close_val is None:
-                        close_val = maybe_parse_float(item.get("close"))
-                    if close_val is None:
-                        continue
-
-                    item_ccy = normalize_currency_code(item.get("ISO_CURRENCY"))
-
-                    if item_date == txn_date:
-                        return f"{close_val:.4f}", item_ccy
-
-                    if item_date <= txn_date:
-                        if best_prior is None or item_date > best_prior[0]:
-                            best_prior = (item_date, close_val, item_ccy)
-
-    if best_prior is not None:
-        return f"{best_prior[1]:.4f}", best_prior[2]
     return "", ""
+
 
 def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
     if not txn_date:
@@ -589,21 +633,55 @@ def to_absolute_url(path_or_url):
 
 
 def extract_security_url_from_text(payload, isin):
-    isin_escaped = re.escape(isin)
-    patterns = [
-        rf"(/web/Wertpapier/[^\"'<\s?#]*-{isin_escaped})",
-        rf"(https?://www\.wealthmanagement\.bnpparibas\.de/web/Wertpapier/[^\"'<\s?#]*-{isin_escaped})",
-        rf"(https?:\\/\\/www\.wealthmanagement\.bnpparibas\.de\\/web\\/Wertpapier\\/[^\"'\s?#]*-{isin_escaped})",
-        rf"(\/web\/Wertpapier\/[^\"'\s?#]*-{isin_escaped})",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, payload, flags=re.IGNORECASE)
-        if not m:
+    if not payload or not isin:
+        return ""
+
+    target = normalize_isin(isin)
+    if not target:
+        return ""
+
+    def normalize_candidate(raw):
+        v = unescape(str(raw or ""))
+        v = v.replace("\\/", "/")
+        v = v.replace("\\u002F", "/").replace("\\u002f", "/")
+        v = unquote(v)
+        v = v.strip().strip("\"'")
+        if not v:
+            return ""
+        if not ("/web/Wertpapier/" in v or "/web/wertpapier/" in v):
+            return ""
+        v = v.split("?")[0].split("#")[0]
+        m = re.search(r"(/web/Wertpapier/[^\"'\s<]*)", v, flags=re.IGNORECASE)
+        if m:
+            v = m.group(1)
+        return to_absolute_url(v)
+
+    scan_payload = unescape(str(payload or ""))
+    scan_payload = scan_payload.replace("\\/", "/")
+    scan_payload = scan_payload.replace("\\u002F", "/").replace("\\u002f", "/")
+
+    # Robust scan for URLs/fragments containing the Wertpapier path.
+    url_pattern = re.compile(
+        r"((?:https?:\/\/|https?://|\/)?[^\"'\s<]*?/web/Wertpapier/[^\"'\s<]*)",
+        flags=re.IGNORECASE,
+    )
+    for m in url_pattern.finditer(scan_payload):
+        cand = normalize_candidate(m.group(1))
+        if not cand:
             continue
-        found = m.group(1)
-        found = unescape(found).replace("\\/", "/")
-        found = found.split("?")[0].split("#")[0]
-        return to_absolute_url(found)
+        if f"-{target}" in cand.upper():
+            m2 = re.search(rf"(.+?-{re.escape(target)})(?:/.*)?$", cand, flags=re.IGNORECASE)
+            return m2.group(1) if m2 else cand
+
+    # Fallback for escaped JSON fragments that only include relative path.
+    fragment_pattern = re.compile(rf"(/web/Wertpapier/[^\"'\s<]*-{re.escape(target)}[^\"'\s<]*)", flags=re.IGNORECASE)
+    m = fragment_pattern.search(scan_payload)
+    if m:
+        cand = normalize_candidate(m.group(1))
+        if cand:
+            m2 = re.search(rf"(.+?-{re.escape(target)})(?:/.*)?$", cand, flags=re.IGNORECASE)
+            return m2.group(1) if m2 else cand
+
     return ""
 
 

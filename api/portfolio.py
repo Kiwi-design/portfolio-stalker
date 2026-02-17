@@ -128,6 +128,10 @@ class handler(BaseHTTPRequestHandler):
             table_cache_enabled = {"prices": True, "fx_daily": True, "asset_event_prices": True, "portfolio_daily_value": True}
             ensured_symbol_min = {}
             ensured_fx_min = {}
+<<<<<<< codex/find-urls-for-given-isins-7b0nbc
+            write_warnings = []
+=======
+>>>>>>> main
 
             def supa_get(table, params):
                 if not table_cache_enabled.get(table, True):
@@ -141,7 +145,7 @@ class handler(BaseHTTPRequestHandler):
 
             def supa_upsert(table, rows, on_conflict):
                 if not rows or not table_cache_enabled.get(table, True):
-                    return
+                    return False
                 req = Request(
                     f"{supabase_url}/rest/v1/{table}?on_conflict={on_conflict}",
                     data=json.dumps(rows).encode("utf-8"),
@@ -153,10 +157,13 @@ class handler(BaseHTTPRequestHandler):
                     method="POST",
                 )
                 try:
-                    with urlopen(req, timeout=20):
-                        pass
-                except Exception:
+                    with urlopen(req, timeout=25):
+                        return True
+                except Exception as e:
                     table_cache_enabled[table] = False
+                    if len(write_warnings) < 20:
+                        write_warnings.append(f"upsert {table} failed: {e}")
+                    return False
 
             txs = fetch_json(
                 f"{supabase_url}/rest/v1/transactions?user_id=eq.{user_id}&select=symbol,side,quantity,price,txn_date,created_at,txn_close_price",
@@ -353,9 +360,54 @@ class handler(BaseHTTPRequestHandler):
 
             def upsert_in_chunks(table, rows, on_conflict, chunk_size=500):
                 if not rows:
+<<<<<<< codex/find-urls-for-given-isins-7b0nbc
+                    return {"ok": 0, "failed": 0}
+                ok = 0
+                failed = 0
+                for i in range(0, len(rows), chunk_size):
+                    chunk = rows[i:i + chunk_size]
+                    if supa_upsert(table, chunk, on_conflict):
+                        ok += len(chunk)
+                    else:
+                        failed += len(chunk)
+                return {"ok": ok, "failed": failed}
+
+            def patch_asset_event_price_row(row):
+                if not table_cache_enabled.get("asset_event_prices", True):
+                    return False
+                user_q = quote(str(row.get("user_id") or ""), safe="")
+                sym_q = quote(str(row.get("symbol") or ""), safe="")
+                date_q = quote(str(row.get("valuation_date") or ""), safe="")
+                payload = {
+                    "close_price_text": row.get("close_price_text"),
+                    "close_native": row.get("close_native"),
+                    "currency": row.get("currency"),
+                    "source": row.get("source"),
+                    "price_status": row.get("price_status"),
+                    "updated_at": row.get("updated_at"),
+                }
+                req = Request(
+                    f"{supabase_url}/rest/v1/asset_event_prices?user_id=eq.{user_q}&symbol=eq.{sym_q}&valuation_date=eq.{date_q}",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        **supa_rest_headers,
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    method="PATCH",
+                )
+                try:
+                    with urlopen(req, timeout=20):
+                        return True
+                except Exception as e:
+                    if len(write_warnings) < 20:
+                        write_warnings.append(f"patch asset_event_prices failed ({row.get('symbol')} {row.get('valuation_date')}): {e}")
+                    return False
+=======
                     return
                 for i in range(0, len(rows), chunk_size):
                     supa_upsert(table, rows[i:i + chunk_size], on_conflict)
+>>>>>>> main
 
             def sync_asset_event_prices(norm_rows, today_iso):
                 if not norm_rows:
@@ -393,7 +445,11 @@ class handler(BaseHTTPRequestHandler):
                             "price_status": "pending",
                             "updated_at": now_utc.isoformat(),
                         })
+<<<<<<< codex/find-urls-for-given-isins-7b0nbc
+                grid_write_stats = upsert_in_chunks("asset_event_prices", grid_rows, "user_id,symbol,valuation_date")
+=======
                 upsert_in_chunks("asset_event_prices", grid_rows, "user_id,symbol,valuation_date")
+>>>>>>> main
 
                 existing_rows = supa_get(
                     "asset_event_prices",
@@ -442,10 +498,28 @@ class handler(BaseHTTPRequestHandler):
                             "updated_at": datetime.now(timezone.utc).isoformat(),
                         })
 
+<<<<<<< codex/find-urls-for-given-isins-7b0nbc
+                updated_ok = 0
+                updated_failed = 0
+                for row in updates:
+                    if patch_asset_event_price_row(row):
+                        updated_ok += 1
+                    else:
+                        updated_failed += 1
+
+                return {
+                    "grid_rows": len(grid_rows),
+                    "updated_rows": len(updates),
+                    "updated_ok": updated_ok,
+                    "updated_failed": updated_failed,
+                    "grid_upsert_ok": grid_write_stats.get("ok", 0),
+                    "grid_upsert_failed": grid_write_stats.get("failed", 0),
+=======
                 upsert_in_chunks("asset_event_prices", updates, "user_id,symbol,valuation_date")
                 return {
                     "grid_rows": len(grid_rows),
                     "updated_rows": len(updates),
+>>>>>>> main
                     "symbols": len(symbols),
                     "dates": len(all_dates),
                 }
@@ -924,8 +998,18 @@ class handler(BaseHTTPRequestHandler):
                 "price_symbols_seen": len({t["symbol"] for t in norm}),
                 "asset_event_prices_grid_rows": asset_event_stats.get("grid_rows", 0),
                 "asset_event_prices_updated_rows": asset_event_stats.get("updated_rows", 0),
+<<<<<<< codex/find-urls-for-given-isins-7b0nbc
+                "asset_event_prices_updated_ok": asset_event_stats.get("updated_ok", 0),
+                "asset_event_prices_updated_failed": asset_event_stats.get("updated_failed", 0),
+                "asset_event_prices_grid_upsert_ok": asset_event_stats.get("grid_upsert_ok", 0),
+                "asset_event_prices_grid_upsert_failed": asset_event_stats.get("grid_upsert_failed", 0),
                 "asset_event_prices_symbols": asset_event_stats.get("symbols", 0),
                 "asset_event_prices_dates": asset_event_stats.get("dates", 0),
+                "write_warnings": write_warnings,
+=======
+                "asset_event_prices_symbols": asset_event_stats.get("symbols", 0),
+                "asset_event_prices_dates": asset_event_stats.get("dates", 0),
+>>>>>>> main
             })
 
         except Exception as e:

@@ -368,38 +368,6 @@ class handler(BaseHTTPRequestHandler):
                         failed += len(chunk)
                 return {"ok": ok, "failed": failed}
 
-            def patch_asset_event_price_row(row):
-                if not table_cache_enabled.get("asset_event_prices", True):
-                    return False
-                user_q = quote(str(row.get("user_id") or ""), safe="")
-                sym_q = quote(str(row.get("symbol") or ""), safe="")
-                date_q = quote(str(row.get("valuation_date") or ""), safe="")
-                payload = {
-                    "close_price_text": row.get("close_price_text"),
-                    "close_native": row.get("close_native"),
-                    "currency": row.get("currency"),
-                    "source": row.get("source"),
-                    "price_status": row.get("price_status"),
-                    "updated_at": row.get("updated_at"),
-                }
-                req = Request(
-                    f"{supabase_url}/rest/v1/asset_event_prices?user_id=eq.{user_q}&symbol=eq.{sym_q}&valuation_date=eq.{date_q}",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={
-                        **supa_rest_headers,
-                        "Content-Type": "application/json",
-                        "Prefer": "return=minimal",
-                    },
-                    method="PATCH",
-                )
-                try:
-                    with urlopen(req, timeout=20):
-                        return True
-                except Exception as e:
-                    if len(write_warnings) < 20:
-                        write_warnings.append(f"patch asset_event_prices failed ({row.get('symbol')} {row.get('valuation_date')}): {e}")
-                    return False
-
             def sync_asset_event_prices(norm_rows, today_iso):
                 if not norm_rows:
                     return {"grid_rows": 0, "updated_rows": 0, "symbols": 0, "dates": 0}
@@ -485,19 +453,13 @@ class handler(BaseHTTPRequestHandler):
                             "updated_at": datetime.now(timezone.utc).isoformat(),
                         })
 
-                updated_ok = 0
-                updated_failed = 0
-                for row in updates:
-                    if patch_asset_event_price_row(row):
-                        updated_ok += 1
-                    else:
-                        updated_failed += 1
+                update_write_stats = upsert_in_chunks("asset_event_prices", updates, "user_id,symbol,valuation_date")
 
                 return {
                     "grid_rows": len(grid_rows),
                     "updated_rows": len(updates),
-                    "updated_ok": updated_ok,
-                    "updated_failed": updated_failed,
+                    "updated_ok": update_write_stats.get("ok", 0),
+                    "updated_failed": update_write_stats.get("failed", 0),
                     "grid_upsert_ok": grid_write_stats.get("ok", 0),
                     "grid_upsert_failed": grid_write_stats.get("failed", 0),
                     "symbols": len(symbols),

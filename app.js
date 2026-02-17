@@ -242,13 +242,11 @@ async function getSessionOrThrow() {
 async function refreshTransactions() {
   setTxStatus("Loading transactions...");
 
-  try {
-    await syncSecurityNamesForUserTransactions();
-  } catch (e) {
+  syncSecurityNamesForUserTransactions().catch((e) => {
     const msg = e?.message || String(e);
     console.warn("Security-name sync skipped:", msg);
     setTxStatus(`Loading transactions... (name sync warning: ${msg})`);
-  }
+  });
 
   const { data, error } = await supabaseClient
     .from("transactions")
@@ -297,7 +295,7 @@ async function refreshTransactions() {
         <td class="num">${Number(r.quantity).toFixed(4)}</td>
         <td class="num">
           <div>${Number(r.price).toFixed(4)}</div>
-          <div class="txn-close-price"><em>${(r.txn_close_price || "unavailable")}</em></div>
+          ${(() => { const parsed = splitTxnCloseAndCurrency(r.txn_close_price); return `<div class="txn-close-price">Close @ txn date${parsed.currency ? ` (${parsed.currency})` : ""}: <em>${parsed.closeText}</em></div>`; })()}
         </td>
         <td>
           <button class="editTx"
@@ -404,6 +402,13 @@ function isLikelyISIN(value) {
 
 function toISODate(d) {
   return d.toISOString().slice(0, 10);
+}
+
+function withTimeout(promise, timeoutMs, timeoutMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs)),
+  ]);
 }
 
 function previousFriday(fromDate = new Date()) {
@@ -899,9 +904,34 @@ async function getCachedSecurityNameForISIN(user_id, symbol) {
   return "";
 }
 
-async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
+
+
+function splitTxnCloseAndCurrency(value) {
+  const text = String(value || "").trim();
+  if (!text || text.toLowerCase() === "unavailable") return { closeText: "unavailable", currency: "" };
+  const m = text.match(/^(.*?)(?:\s+([A-Z]{3}))$/);
+  if (!m) return { closeText: text, currency: "" };
+  return { closeText: (m[1] || "").trim() || text, currency: m[2] || "" };
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchSecurityDataForSymbol(symbol, user_id, txn_date, timeoutMs = 45000) {
   const normalized = String(symbol || "").trim().toUpperCase();
-  if (!isLikelyISIN(normalized)) return { security_name: normalized, txn_close_price: "unavailable" };
+  if (!normalized) return { security_name: "", txn_close_price: "unavailable" };
+  const symbolParam = isLikelyISIN(normalized)
+    ? `isin=${encodeURIComponent(normalized)}`
+    : `symbol=${encodeURIComponent(normalized)}`;
 
   if (user_id) {
     const cached = await getCachedSecurityNameForISIN(user_id, normalized);
@@ -909,12 +939,10 @@ async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
       return { security_name: cached, txn_close_price: "unavailable" };
     }
     if (cached && txn_date) {
-      // still call backend to resolve txn-date close price
       const session = await getSessionOrThrow();
       const token = session.access_token;
-      const url = `${API_BASE}/api/isin_name?isin=${encodeURIComponent(normalized)}&txn_date=${encodeURIComponent(txn_date || "")}`;
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      const data = await res.json().catch(() => ({}));
+      const url = `${API_BASE}/api/isin_name?${symbolParam}&txn_date=${encodeURIComponent(txn_date || "")}`;
+      const { res, data } = await fetchJsonWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, timeoutMs);
       if (res.ok && data.status === "ok") {
         return {
           security_name: cached,
@@ -927,19 +955,14 @@ async function fetchSecurityDataForISIN(symbol, user_id, txn_date) {
 
   const session = await getSessionOrThrow();
   const token = session.access_token;
-
-  const url = `${API_BASE}/api/isin_name?isin=${encodeURIComponent(normalized)}&txn_date=${encodeURIComponent(txn_date || "")}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  const data = await res.json().catch(() => ({}));
+  const url = `${API_BASE}/api/isin_name?${symbolParam}&txn_date=${encodeURIComponent(txn_date || "")}`;
+  const { res, data } = await fetchJsonWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } }, timeoutMs);
   if (!res.ok || data.status !== "ok") {
     const message = data?.message || `Unable to resolve security data for ${normalized}`;
     throw new Error(message);
   }
 
-  const security_name = normalizeStoredSecurityName(data?.name, normalized);
-  if (!security_name) {
-    throw new Error(`No security name found for ISIN ${normalized}`);
-  }
+  const security_name = normalizeStoredSecurityName(data?.name, normalized) || normalized;
   return {
     security_name,
     txn_close_price: (data?.txn_close_price || "unavailable").toString(),
@@ -953,13 +976,10 @@ async function syncSecurityNamesForUserTransactions() {
   const token = session.access_token;
 
   const res = await fetch(`${API_BASE}/api/isin_name`, {
-    headers: { Authorization: `Bearer ${token}` }
+    headers: { Authorization: `Bearer ${token}` },
   });
-
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data?.message || "Could not sync ISIN security names");
-  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.message || "Could not sync ISIN security names");
 }
 
 
@@ -1021,7 +1041,7 @@ async function cleanupInvalidSecurityNamesForUser() {
 
   for (const symbol of unresolvedSymbols) {
     try {
-      const resolvedData = await fetchSecurityDataForISIN(symbol, user_id, "");
+      const resolvedData = await fetchSecurityDataForSymbol(symbol, user_id, "");
       const resolved = resolvedData.security_name;
       if (!resolved) continue;
       canonicalBySymbol.set(symbol, resolved);
@@ -1048,6 +1068,25 @@ async function ensureSecurityNamesBackfilledSilently() {
 
 /* ---------- Add / Edit ---------- */
 
+async function enrichTransactionMetadataInBackground(txId, user_id, symbol, txn_date) {
+  try {
+    const resolved = await fetchSecurityDataForSymbol(symbol, user_id, txn_date, 90000);
+    const patch = {};
+    if (resolved?.security_name) patch.security_name = resolved.security_name;
+    if (resolved?.txn_close_price && resolved.txn_close_price !== "unavailable") {
+      patch.txn_close_price = resolved.txn_close_price;
+    }
+    if (!Object.keys(patch).length) return;
+    await supabaseClient
+      .from("transactions")
+      .update(patch)
+      .eq("id", txId)
+      .eq("user_id", user_id);
+  } catch (e) {
+    console.warn("Background metadata enrichment failed:", e?.message || e);
+  }
+}
+
 addTxBtn.addEventListener("click", async () => {
   const symbol = txSymbolEl.value.trim().toUpperCase();
   const txn_date = txDateEl.value;
@@ -1065,23 +1104,34 @@ addTxBtn.addEventListener("click", async () => {
   try {
     const session = await getSessionOrThrow();
     const user_id = session.user.id;
-    const securityData = await fetchSecurityDataForISIN(symbol, user_id, txn_date);
-    const security_name = securityData.security_name;
-    const txn_close_price = securityData.txn_close_price || "unavailable";
+    const security_name = symbol;
+    const txn_close_price = "unavailable";
 
     let error;
+    let savedId = editingTxId;
 
     if (!editingTxId) {
-      ({ error } = await supabaseClient.from("transactions").insert([{
-        user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price
-      }]));
-    } else {
-      ({ error } = await supabaseClient
-        .from("transactions")
-        .update({ symbol, security_name, txn_close_price, txn_date, side, quantity, price })
-        .eq("id", editingTxId)
-        .eq("user_id", user_id)
+      const { data: inserted, error: insertError } = await withTimeout(
+        supabaseClient
+          .from("transactions")
+          .insert([{ user_id, symbol, security_name, txn_close_price, txn_date, side, quantity, price }])
+          .select("id")
+          .single(),
+        15000,
+        "Insert timed out",
       );
+      error = insertError;
+      savedId = inserted?.id || null;
+    } else {
+      ({ error } = await withTimeout(
+        supabaseClient
+          .from("transactions")
+          .update({ symbol, security_name, txn_close_price, txn_date, side, quantity, price })
+          .eq("id", editingTxId)
+          .eq("user_id", user_id),
+        15000,
+        "Update timed out",
+      ));
     }
 
     if (error) {
@@ -1098,7 +1148,16 @@ addTxBtn.addEventListener("click", async () => {
       txPriceEl.value = "";
     }
 
-    await refreshTransactions();
+    if (savedId) {
+      void enrichTransactionMetadataInBackground(savedId, user_id, symbol, txn_date)
+        .then(() => refreshTransactions())
+        .catch((e) => console.warn("Background refresh failed:", e?.message || e));
+    }
+
+    // Don't keep Add/Edit status blocked if background refresh sync is slow.
+    refreshTransactions().catch((e) => {
+      console.warn("Post-save refresh failed:", e?.message || e);
+    });
   } catch (e) {
     setAddEditStatus("Error: " + e.message);
   }

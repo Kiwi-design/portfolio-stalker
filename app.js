@@ -151,7 +151,6 @@ function renderTransactions(rows) {
       <table>
         <thead>
           <tr>
-            <th>ID</th>
             <th>Name</th>
             <th>Symbol</th>
             <th>Date</th>
@@ -167,7 +166,6 @@ function renderTransactions(rows) {
   for (const tx of rows) {
     html += `
       <tr>
-        <td>${tx.id}</td>
         <td>${tx.security_name || ""}</td>
         <td>${tx.symbol}</td>
         <td>${tx.txn_date}</td>

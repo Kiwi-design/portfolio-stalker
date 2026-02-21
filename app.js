@@ -295,7 +295,6 @@ async function refreshTransactions() {
   } catch (e) {
     setTxStatus(`Error loading transactions: ${e.message}`);
   }
-}
 
 async function saveTransaction() {
   try {

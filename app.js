@@ -411,6 +411,12 @@ function withTimeout(promise, timeoutMs, timeoutMessage) {
   ]);
 }
 
+function isMissingTableError(error) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || "").toLowerCase();
+  return code === "42P01" || message.includes("does not exist");
+}
+
 function previousFriday(fromDate = new Date()) {
   const d = new Date(fromDate);
   const day = d.getUTCDay();
@@ -427,7 +433,10 @@ async function buildPortfolioHistory() {
     .eq("user_id", session.user.id)
     .order("valuation_date", { ascending: true });
 
-  if (error) throw new Error(`portfolio_daily_value error: ${error.message}`);
+  if (error) {
+    if (isMissingTableError(error)) return { history: [], dailyReturns: [] };
+    throw new Error(`portfolio_daily_value error: ${error.message}`);
+  }
 
   const cleaned = (data || [])
     .map((row) => ({ date: row.valuation_date, value: Number(row.portfolio_value_eur) }))

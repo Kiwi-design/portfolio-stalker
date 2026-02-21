@@ -1,8 +1,7 @@
 const SUPABASE_URL = "https://dalchqdooacrxtonyoee.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRhbGNocWRvb2Fjcnh0b255b2VlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA1MzM0NTQsImV4cCI6MjA4NjEwOTQ1NH0.4zsqZ0uXNuouoAU7STUb7PGWvOvkweZX6f6RUI8lun4";
 const EMAIL_REDIRECT = "https://kiwi-design.github.io/portfolio-stalker/";
-const EODHD_API_TOKEN = "6996bda2b9d900.81666647";
-const EXCHANGE_PRIORITY = ["XETRA", "F", "PA", "AS", "BR", "SW", "MI", "LSE", "US", "EUFUND"];
+const API_BASE = "https://portfolio-stalker.vercel.app";
 
 const supabaseLib = window.supabase;
 const supabaseClient = supabaseLib ? supabaseLib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
@@ -61,75 +60,25 @@ function isLikelyIsin(value) {
   return /^[A-Z]{2}[A-Z0-9]{10}$/.test(normalizeIsin(value));
 }
 
-function exchangeScore(exchange) {
-  const pos = EXCHANGE_PRIORITY.indexOf(String(exchange || "").trim().toUpperCase());
-  return pos === -1 ? 9999 : pos;
-}
-
-async function eodhdSearchByIsin(isin) {
-  const url = `https://eodhd.com/api/search/${encodeURIComponent(isin)}?api_token=${encodeURIComponent(EODHD_API_TOKEN)}&fmt=json&limit=100`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`EODHD search failed (${response.status})`);
-  const payload = await response.json();
-  if (!Array.isArray(payload)) return [];
-
-  return payload
-    .filter((row) => normalizeIsin(row?.ISIN) === isin)
-    .map((row) => ({
-      ticker: `${row.Code || ""}.${row.Exchange || ""}`,
-      exchange: row.Exchange || "",
-      code: row.Code || "",
-      name: row.Name || "",
-      type: row.Type || "",
-      currency: String(row.Currency || "").toUpperCase(),
-      isPrimary: Boolean(row.isPrimary),
-      previousCloseDate: row.previousCloseDate || "",
-    }))
-    .filter((row) => row.ticker && row.exchange && row.code);
-}
-
-function chooseBestEurCandidate(candidates) {
-  const eurOnly = candidates.filter((c) => c.currency === "EUR");
-  if (!eurOnly.length) return null;
-
-  const ranked = [...eurOnly].sort((a, b) => {
-    const venueDiff = exchangeScore(a.exchange) - exchangeScore(b.exchange);
-    if (venueDiff !== 0) return venueDiff;
-    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
-    return String(b.previousCloseDate).localeCompare(String(a.previousCloseDate));
-  });
-  return ranked[0];
-}
-
-async function fetchEodhdClosePrice(ticker, txnDate) {
-  const url = `https://eodhd.com/api/eod/${encodeURIComponent(ticker)}?api_token=${encodeURIComponent(EODHD_API_TOKEN)}&fmt=json&period=d&order=a&from=${encodeURIComponent(txnDate)}&to=${encodeURIComponent(txnDate)}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`EODHD close lookup failed (${response.status})`);
-  const payload = await response.json();
-  if (!Array.isArray(payload) || !payload.length) return "unavailable";
-  const row = payload[0] || {};
-  const close = Number(row.close);
-  if (!Number.isFinite(close)) return "unavailable";
-  return `${close.toFixed(6)} EUR`;
-}
-
-async function resolveInstrumentForTransaction(inputSymbol, txnDate) {
+async function resolveInstrumentForTransaction(session, inputSymbol, txnDate) {
   const raw = normalizeIsin(inputSymbol);
-  if (!isLikelyIsin(raw)) {
-    return { symbol: raw, security_name: raw, txn_close_price: "unavailable" };
+  const qs = isLikelyIsin(raw)
+    ? `isin=${encodeURIComponent(raw)}&txn_date=${encodeURIComponent(txnDate)}`
+    : `symbol=${encodeURIComponent(raw)}&txn_date=${encodeURIComponent(txnDate)}`;
+
+  const response = await fetch(`${API_BASE}/api/isin_name?${qs}`, {
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.message || `Resolver API failed (${response.status})`);
   }
 
-  const candidates = await eodhdSearchByIsin(raw);
-  const best = chooseBestEurCandidate(candidates);
-  if (!best) {
-    throw new Error(`No EUR candidate found in EODHD for ISIN ${raw}`);
-  }
-
-  const txn_close_price = await fetchEodhdClosePrice(best.ticker, txnDate);
   return {
-    symbol: best.ticker,
-    security_name: best.name || raw,
-    txn_close_price,
+    symbol: String(payload?.symbol || raw).trim().toUpperCase(),
+    security_name: String(payload?.name || raw).trim(),
+    txn_close_price: String(payload?.txn_close_price || "unavailable").trim() || "unavailable",
   };
 }
 
@@ -313,7 +262,7 @@ async function saveTransaction() {
     }
 
     setAddEditStatus("Resolving ISIN via EODHD...");
-    const resolved = await resolveInstrumentForTransaction(inputSymbol, txn_date);
+    const resolved = await resolveInstrumentForTransaction(session, inputSymbol, txn_date);
     const row = {
       symbol: resolved.symbol,
       security_name: resolved.security_name,

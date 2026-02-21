@@ -1,6 +1,8 @@
 const SUPABASE_URL = "https://dalchqdooacrxtonyoee.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRhbGNocWRvb2Fjcnh0b255b2VlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzA1MzM0NTQsImV4cCI6MjA4NjEwOTQ1NH0.4zsqZ0uXNuouoAU7STUb7PGWvOvkweZX6f6RUI8lun4";
 const EMAIL_REDIRECT = "https://kiwi-design.github.io/portfolio-stalker/";
+const EODHD_API_TOKEN = "6996bda2b9d900.81666647";
+const EXCHANGE_PRIORITY = ["XETRA", "F", "PA", "AS", "BR", "SW", "MI", "LSE", "US", "EUFUND"];
 
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -50,6 +52,86 @@ function setStatus(msg) { statusEl.textContent = msg; }
 function setTxStatus(msg) { txStatusEl.textContent = msg; }
 function setAddEditStatus(msg) { addEditStatusEl.textContent = msg; }
 
+function normalizeIsin(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function isLikelyIsin(value) {
+  return /^[A-Z]{2}[A-Z0-9]{10}$/.test(normalizeIsin(value));
+}
+
+function exchangeScore(exchange) {
+  const pos = EXCHANGE_PRIORITY.indexOf(String(exchange || "").trim().toUpperCase());
+  return pos === -1 ? 9999 : pos;
+}
+
+async function eodhdSearchByIsin(isin) {
+  const url = `https://eodhd.com/api/search/${encodeURIComponent(isin)}?api_token=${encodeURIComponent(EODHD_API_TOKEN)}&fmt=json&limit=100`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`EODHD search failed (${response.status})`);
+  const payload = await response.json();
+  if (!Array.isArray(payload)) return [];
+
+  return payload
+    .filter((row) => normalizeIsin(row?.ISIN) === isin)
+    .map((row) => ({
+      ticker: `${row.Code || ""}.${row.Exchange || ""}`,
+      exchange: row.Exchange || "",
+      code: row.Code || "",
+      name: row.Name || "",
+      type: row.Type || "",
+      currency: String(row.Currency || "").toUpperCase(),
+      isPrimary: Boolean(row.isPrimary),
+      previousCloseDate: row.previousCloseDate || "",
+    }))
+    .filter((row) => row.ticker && row.exchange && row.code);
+}
+
+function chooseBestEurCandidate(candidates) {
+  const eurOnly = candidates.filter((c) => c.currency === "EUR");
+  if (!eurOnly.length) return null;
+
+  const ranked = [...eurOnly].sort((a, b) => {
+    const venueDiff = exchangeScore(a.exchange) - exchangeScore(b.exchange);
+    if (venueDiff !== 0) return venueDiff;
+    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+    return String(b.previousCloseDate).localeCompare(String(a.previousCloseDate));
+  });
+  return ranked[0];
+}
+
+async function fetchEodhdClosePrice(ticker, txnDate) {
+  const url = `https://eodhd.com/api/eod/${encodeURIComponent(ticker)}?api_token=${encodeURIComponent(EODHD_API_TOKEN)}&fmt=json&period=d&order=a&from=${encodeURIComponent(txnDate)}&to=${encodeURIComponent(txnDate)}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`EODHD close lookup failed (${response.status})`);
+  const payload = await response.json();
+  if (!Array.isArray(payload) || !payload.length) return "unavailable";
+  const row = payload[0] || {};
+  const close = Number(row.close);
+  if (!Number.isFinite(close)) return "unavailable";
+  return `${close.toFixed(6)} EUR`;
+}
+
+async function resolveInstrumentForTransaction(inputSymbol, txnDate) {
+  const raw = normalizeIsin(inputSymbol);
+  if (!isLikelyIsin(raw)) {
+    return { symbol: raw, security_name: raw, txn_close_price: "unavailable" };
+  }
+
+  const candidates = await eodhdSearchByIsin(raw);
+  const best = chooseBestEurCandidate(candidates);
+  if (!best) {
+    throw new Error(`No EUR candidate found in EODHD for ISIN ${raw}`);
+  }
+
+  const txn_close_price = await fetchEodhdClosePrice(best.ticker, txnDate);
+  return {
+    symbol: best.ticker,
+    security_name: best.name || raw,
+    txn_close_price,
+  };
+}
+
 function setMenuOpen(isOpen) {
   menuEl.classList.toggle("open", isOpen);
   menuToggleBtn.setAttribute("aria-expanded", String(isOpen));
@@ -59,26 +141,11 @@ function setActiveTab(which) {
   [tabPortfolio, tabPerformance, tabTransactions, tabAddEdit, tabStatistics].forEach((b) => b.classList.remove("active"));
   [sectionPortfolio, sectionPerformance, sectionTransactions, sectionAddEdit, sectionStatistics].forEach((s) => s.classList.remove("active"));
 
-  if (which === "portfolio") {
-    tabPortfolio.classList.add("active");
-    sectionPortfolio.classList.add("active");
-  }
-  if (which === "performance") {
-    tabPerformance.classList.add("active");
-    sectionPerformance.classList.add("active");
-  }
-  if (which === "transactions") {
-    tabTransactions.classList.add("active");
-    sectionTransactions.classList.add("active");
-  }
-  if (which === "addedit") {
-    tabAddEdit.classList.add("active");
-    sectionAddEdit.classList.add("active");
-  }
-  if (which === "statistics") {
-    tabStatistics.classList.add("active");
-    sectionStatistics.classList.add("active");
-  }
+  if (which === "portfolio") { tabPortfolio.classList.add("active"); sectionPortfolio.classList.add("active"); }
+  if (which === "performance") { tabPerformance.classList.add("active"); sectionPerformance.classList.add("active"); }
+  if (which === "transactions") { tabTransactions.classList.add("active"); sectionTransactions.classList.add("active"); }
+  if (which === "addedit") { tabAddEdit.classList.add("active"); sectionAddEdit.classList.add("active"); }
+  if (which === "statistics") { tabStatistics.classList.add("active"); sectionStatistics.classList.add("active"); }
 }
 
 function setLoggedInUI(email) {
@@ -86,7 +153,6 @@ function setLoggedInUI(email) {
   signupBtn.style.display = "none";
   loginBtn.style.display = "none";
   logoutBtn.style.display = "none";
-
   postLoginPanel.style.display = "grid";
   appBox.style.display = "none";
   loggedInHintEl.textContent = `Logged in as: ${email}\nUse the menu to open a section.`;
@@ -99,7 +165,6 @@ function setLoggedOutUI() {
   signupBtn.style.display = "inline-block";
   loginBtn.style.display = "inline-block";
   logoutBtn.style.display = "none";
-
   postLoginPanel.style.display = "none";
   appBox.style.display = "none";
   loggedInHintEl.textContent = "";
@@ -187,32 +252,23 @@ function renderTransactions(rows) {
 
   txListEl.querySelectorAll(".edit-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const id = Number(btn.dataset.id);
-      const tx = rows.find((r) => Number(r.id) === id);
+      const id = String(btn.dataset.id || "");
+      const tx = rows.find((r) => String(r.id) === id);
       if (tx) enterEditMode(tx);
     });
   });
 
   txListEl.querySelectorAll(".delete-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      const id = Number(btn.dataset.id);
+      const id = String(btn.dataset.id || "");
       const ok = window.confirm(`Delete transaction ${id}?`);
       if (!ok) return;
 
       try {
         const session = await getSessionOrThrow();
-        const { error } = await supabaseClient
-          .from("transactions")
-          .delete()
-          .eq("id", id)
-          .eq("user_id", session.user.id);
-
-        if (error) {
-          setTxStatus(`Delete error: ${error.message}`);
-          return;
-        }
-
-        if (editingTxId === id) exitEditMode();
+        const { error } = await supabaseClient.from("transactions").delete().eq("id", id).eq("user_id", session.user.id);
+        if (error) throw error;
+        if (String(editingTxId) === id) exitEditMode();
         setTxStatus("Deleted ✅");
         await refreshTransactions();
       } catch (e) {
@@ -228,50 +284,51 @@ async function refreshTransactions() {
     const session = await getSessionOrThrow();
     const { data, error } = await supabaseClient
       .from("transactions")
-      .select("id,user_id,symbol,security_name,txn_date,side,quantity,price,created_at")
+      .select("id,user_id,symbol,security_name,txn_close_price,txn_date,side,quantity,price,created_at")
       .eq("user_id", session.user.id)
       .order("txn_date", { ascending: false })
       .order("created_at", { ascending: false });
 
-    if (error) {
-      setTxStatus(`Error loading transactions: ${error.message}`);
-      return;
-    }
-
+    if (error) throw error;
     renderTransactions(data || []);
     setTxStatus(`${(data || []).length} transaction(s).`);
   } catch (e) {
     setTxStatus(`Error loading transactions: ${e.message}`);
   }
-}
 
 async function saveTransaction() {
   try {
     const session = await getSessionOrThrow();
-    const symbol = String(txSymbolEl.value || "").trim().toUpperCase();
+    const inputSymbol = String(txSymbolEl.value || "").trim();
     const txn_date = String(txDateEl.value || "").trim();
     const side = String(txSideEl.value || "").trim().toUpperCase();
     const quantity = Number(txQtyEl.value);
     const price = Number(txPriceEl.value);
 
-    if (!symbol || !txn_date || !["BUY", "SELL"].includes(side) || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(price) || price <= 0) {
-      setAddEditStatus("Please provide valid symbol, date, side, quantity and price.");
+    if (!inputSymbol || !txn_date || !["BUY", "SELL"].includes(side) || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(price) || price <= 0) {
+      setAddEditStatus("Please provide valid ISIN/symbol, date, side, quantity and price.");
       return;
     }
 
+    setAddEditStatus("Resolving ISIN via EODHD...");
+    const resolved = await resolveInstrumentForTransaction(inputSymbol, txn_date);
+    const row = {
+      symbol: resolved.symbol,
+      security_name: resolved.security_name,
+      txn_close_price: resolved.txn_close_price,
+      txn_date,
+      side,
+      quantity,
+      price,
+    };
+
     if (editingTxId) {
-      const { error } = await supabaseClient
-        .from("transactions")
-        .update({ symbol, txn_date, side, quantity, price })
-        .eq("id", editingTxId)
-        .eq("user_id", session.user.id);
+      const { error } = await supabaseClient.from("transactions").update(row).eq("id", editingTxId).eq("user_id", session.user.id);
       if (error) throw error;
       setAddEditStatus(`Saved transaction ${editingTxId} ✅`);
       exitEditMode();
     } else {
-      const { error } = await supabaseClient
-        .from("transactions")
-        .insert([{ user_id: session.user.id, symbol, txn_date, side, quantity, price }]);
+      const { error } = await supabaseClient.from("transactions").insert([{ user_id: session.user.id, ...row }]);
       if (error) throw error;
       setAddEditStatus("Transaction added ✅");
     }
@@ -287,22 +344,10 @@ async function doSignup() {
   setStatus("Signing up...");
   const email = emailEl.value.trim();
   const password = passwordEl.value;
-  if (!email || !password) {
-    setStatus("Provide email and password.");
-    return;
-  }
+  if (!email || !password) { setStatus("Provide email and password."); return; }
 
-  const { error } = await supabaseClient.auth.signUp({
-    email,
-    password,
-    options: { emailRedirectTo: EMAIL_REDIRECT },
-  });
-
-  if (error) {
-    setStatus(`Signup error: ${error.message}`);
-    return;
-  }
-
+  const { error } = await supabaseClient.auth.signUp({ email, password, options: { emailRedirectTo: EMAIL_REDIRECT } });
+  if (error) { setStatus(`Signup error: ${error.message}`); return; }
   setStatus("Signup successful. Check your email to confirm your account.");
 }
 
@@ -310,44 +355,25 @@ async function doLogin() {
   setStatus("Logging in...");
   const email = emailEl.value.trim();
   const password = passwordEl.value;
-  if (!email || !password) {
-    setStatus("Provide email and password.");
-    return;
-  }
+  if (!email || !password) { setStatus("Provide email and password."); return; }
 
   const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
-  if (error) {
-    setStatus(`Login error: ${error.message}`);
-    return;
-  }
-
+  if (error) { setStatus(`Login error: ${error.message}`); return; }
   setStatus("Logged in ✅");
 }
 
 async function doLogout() {
   setStatus("Logging out...");
   const { error } = await supabaseClient.auth.signOut();
-  if (error) {
-    setStatus(`Logout error: ${error.message}`);
-    return;
-  }
+  if (error) { setStatus(`Logout error: ${error.message}`); return; }
   setLoggedOutUI();
 }
 
 signupBtn.addEventListener("click", doSignup);
 loginBtn.addEventListener("click", doLogin);
 logoutBtn.addEventListener("click", doLogout);
-
-menuLogoutBtn.addEventListener("click", async () => {
-  setMenuOpen(false);
-  await doLogout();
-});
-
-menuToggleBtn.addEventListener("click", (event) => {
-  event.stopPropagation();
-  setMenuOpen(!menuEl.classList.contains("open"));
-});
-
+menuLogoutBtn.addEventListener("click", async () => { setMenuOpen(false); await doLogout(); });
+menuToggleBtn.addEventListener("click", (event) => { event.stopPropagation(); setMenuOpen(!menuEl.classList.contains("open")); });
 menuEl.addEventListener("click", (event) => event.stopPropagation());
 document.addEventListener("click", () => setMenuOpen(false));
 
@@ -363,7 +389,6 @@ tabPerformance.addEventListener("click", openTab("performance"));
 tabTransactions.addEventListener("click", openTab("transactions"));
 tabAddEdit.addEventListener("click", openTab("addedit"));
 tabStatistics.addEventListener("click", openTab("statistics"));
-
 refreshTxBtn.addEventListener("click", refreshTransactions);
 addTxBtn.addEventListener("click", saveTransaction);
 cancelEditBtn.addEventListener("click", exitEditMode);
@@ -373,7 +398,6 @@ supabaseClient.auth.onAuthStateChange(async (_event, session) => {
     setLoggedOutUI();
     return;
   }
-
   setLoggedInUI(session.user.email || "");
   appBox.style.display = "block";
   setActiveTab("transactions");
@@ -386,7 +410,6 @@ supabaseClient.auth.onAuthStateChange(async (_event, session) => {
     setLoggedOutUI();
     return;
   }
-
   setLoggedInUI(data.session.user.email || "");
   appBox.style.display = "block";
   setActiveTab("transactions");

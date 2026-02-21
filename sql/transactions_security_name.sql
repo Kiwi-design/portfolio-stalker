@@ -39,6 +39,6 @@ where t.user_id = c.user_id
   and (t.security_name is null or btrim(t.security_name) = '');
 
 comment on column public.transactions.security_name is
-  'Cached security/fund name resolved from BNP Wealth Management for the ISIN stored in symbol';
+  'Cached security/fund name resolved from EODHD for the ISIN entered by the user';
 comment on column public.transactions.txn_close_price is
-  'Closing price on transaction date from BNP AJAX/history lookup; set to unavailable when not retrievable';
+  'Closing price on transaction date from EODHD lookup; set to unavailable when not retrievable';

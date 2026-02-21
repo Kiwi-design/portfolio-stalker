@@ -125,7 +125,13 @@ class handler(BaseHTTPRequestHandler):
             one_year_ago = (now_utc - timedelta(days=365)).strftime("%Y-%m-%d")
             price_cache = {}  # symbol -> {date -> row}
             fx_cache = {}     # ccy -> {date -> row}
-            table_cache_enabled = {"prices": True, "fx_daily": True, "asset_event_prices": True, "portfolio_daily_value": True}
+            table_cache_enabled = {
+                "prices": True,
+                "fx_daily": True,
+                # Deprecated tables removed from Supabase schema.
+                "asset_event_prices": False,
+                "portfolio_daily_value": False,
+            }
             ensured_symbol_min = {}
             ensured_fx_min = {}
             write_warnings = []

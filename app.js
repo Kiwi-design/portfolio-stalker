@@ -4,7 +4,8 @@ const EMAIL_REDIRECT = "https://kiwi-design.github.io/portfolio-stalker/";
 const EODHD_API_TOKEN = "6996bda2b9d900.81666647";
 const EXCHANGE_PRIORITY = ["XETRA", "F", "PA", "AS", "BR", "SW", "MI", "LSE", "US", "EUFUND"];
 
-const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabaseLib = window.supabase;
+const supabaseClient = supabaseLib ? supabaseLib.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 const emailEl = document.getElementById("email");
 const passwordEl = document.getElementById("password");
@@ -295,6 +296,7 @@ async function refreshTransactions() {
   } catch (e) {
     setTxStatus(`Error loading transactions: ${e.message}`);
   }
+}
 
 async function saveTransaction() {
   try {
@@ -341,6 +343,7 @@ async function saveTransaction() {
 }
 
 async function doSignup() {
+  if (!supabaseClient) { setStatus("App init error: Supabase SDK failed to load. Please refresh."); return; }
   setStatus("Signing up...");
   const email = emailEl.value.trim();
   const password = passwordEl.value;
@@ -352,6 +355,7 @@ async function doSignup() {
 }
 
 async function doLogin() {
+  if (!supabaseClient) { setStatus("App init error: Supabase SDK failed to load. Please refresh."); return; }
   setStatus("Logging in...");
   const email = emailEl.value.trim();
   const password = passwordEl.value;
@@ -363,6 +367,7 @@ async function doLogin() {
 }
 
 async function doLogout() {
+  if (!supabaseClient) { setStatus("App init error: Supabase SDK failed to load. Please refresh."); return; }
   setStatus("Logging out...");
   const { error } = await supabaseClient.auth.signOut();
   if (error) { setStatus(`Logout error: ${error.message}`); return; }
@@ -393,7 +398,9 @@ refreshTxBtn.addEventListener("click", refreshTransactions);
 addTxBtn.addEventListener("click", saveTransaction);
 cancelEditBtn.addEventListener("click", exitEditMode);
 
-supabaseClient.auth.onAuthStateChange(async (_event, session) => {
+if (!supabaseClient) {
+  setStatus("App init error: Supabase SDK failed to load. Check your connection and refresh.");
+} else supabaseClient.auth.onAuthStateChange(async (_event, session) => {
   if (!session) {
     setLoggedOutUI();
     return;
@@ -405,6 +412,11 @@ supabaseClient.auth.onAuthStateChange(async (_event, session) => {
 });
 
 (async function init() {
+  if (!supabaseClient) {
+    setLoggedOutUI();
+    setStatus("App init error: Supabase SDK failed to load. Check your connection and refresh.");
+    return;
+  }
   const { data } = await supabaseClient.auth.getSession();
   if (!data.session) {
     setLoggedOutUI();

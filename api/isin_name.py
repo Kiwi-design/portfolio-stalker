@@ -18,6 +18,9 @@ INVALID_NAME_VALUES = {"", "null", "none", "n/a", "na", "undefined", "-"}
 BASE_DOMAIN = "https://www.wealthmanagement.bnpparibas.de"
 YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart/"
 YAHOO_SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search"
+EODHD_SEARCH_BASE = "https://eodhd.com/api/search/"
+EODHD_EOD_BASE = "https://eodhd.com/api/eod/"
+EODHD_EXCHANGE_PRIORITY = ["XETRA", "F", "PA", "AS", "BR", "SW", "MI", "LSE", "US", "EUFUND"]
 
 _BNP_COOKIE_JAR = http.cookiejar.CookieJar()
 _BNP_OPENER = build_opener(HTTPCookieProcessor(_BNP_COOKIE_JAR))
@@ -87,6 +90,87 @@ def normalize_isin(value):
 
 def normalize_symbol(value):
     return str(value or "").strip().upper()
+
+
+def eodhd_api_token():
+    return os.environ.get("EODHD_API_TOKEN", "6996bda2b9d900.81666647").strip()
+
+
+def eodhd_exchange_score(exchange):
+    ex = normalize_symbol(exchange)
+    try:
+        return EODHD_EXCHANGE_PRIORITY.index(ex)
+    except ValueError:
+        return 9999
+
+
+def eodhd_search_candidates_for_isin(isin):
+    token = eodhd_api_token()
+    if not token:
+        return []
+    target = normalize_isin(isin)
+    if not target:
+        return []
+
+    payload = fetch_json(
+        f"{EODHD_SEARCH_BASE}{quote_plus(target)}?api_token={quote_plus(token)}&fmt=json&limit=100",
+        headers={"User-Agent": UA, "Accept": "application/json"},
+        timeout=25,
+    )
+    if not isinstance(payload, list):
+        return []
+
+    out = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        if normalize_isin(row.get("ISIN")) != target:
+            continue
+        code = normalize_symbol(row.get("Code"))
+        exchange = normalize_symbol(row.get("Exchange"))
+        if not code or not exchange:
+            continue
+        out.append({
+            "symbol": f"{code}.{exchange}",
+            "exchange": exchange,
+            "name": normalize_name(row.get("Name")),
+            "currency": normalize_currency_code(row.get("Currency")),
+            "is_primary": bool(row.get("isPrimary")),
+            "previous_close_date": str(row.get("previousCloseDate") or ""),
+        })
+    return out
+
+
+def eodhd_pick_best_eur(candidates):
+    eur = [c for c in candidates if c.get("currency") == "EUR"]
+    if not eur:
+        return None
+    eur.sort(
+        key=lambda c: (
+            eodhd_exchange_score(c.get("exchange")),
+            0 if c.get("is_primary") else 1,
+            -int((c.get("previous_close_date") or "").replace("-", "")[:8] or "0"),
+        )
+    )
+    return eur[0]
+
+
+def eodhd_close_for_symbol_date(symbol, txn_date):
+    token = eodhd_api_token()
+    if not token or not txn_date:
+        return "", ""
+    payload = fetch_json(
+        f"{EODHD_EOD_BASE}{quote_plus(symbol)}?api_token={quote_plus(token)}&fmt=json&period=d&order=a&from={quote_plus(txn_date)}&to={quote_plus(txn_date)}",
+        headers={"User-Agent": UA, "Accept": "application/json"},
+        timeout=25,
+    )
+    if not isinstance(payload, list) or not payload:
+        return "unavailable", "EUR"
+    first = payload[0] if isinstance(payload[0], dict) else {}
+    close = maybe_parse_float(first.get("close"))
+    if close is None:
+        return "unavailable", "EUR"
+    return f"{close:.6f}", "EUR"
 
 
 def normalize_name(value):
@@ -581,27 +665,30 @@ def bnp_closing_price_for_isin_date(isin, txn_date, security_url=""):
 
 
 def resolve_security_metadata(isin, txn_date=None):
-    lookup = bnp_find_url_and_name_for_isin(isin)
-    name = normalize_name((lookup or {}).get("name"))
-    security_url = (lookup or {}).get("url", "")
+    candidates = eodhd_search_candidates_for_isin(isin)
+    best = eodhd_pick_best_eur(candidates)
+    if not best:
+        return {
+            "name": "",
+            "symbol": normalize_isin(isin),
+            "url": "",
+            "source": "eodhd",
+            "category": "",
+            "txn_close_price": "unavailable",
+            "txn_close_currency": "EUR",
+        }
 
-    yahoo_symbol, yahoo_name = yahoo_symbol_for_isin(isin)
-    if not name and yahoo_name:
-        name = yahoo_name
-
-    close_price, close_ccy = bnp_closing_price_for_isin_date(isin, txn_date, security_url=security_url) if txn_date else ("", "")
-    if (not close_price or close_price == "unavailable") and txn_date and yahoo_symbol:
-        close_price, close_ccy = yahoo_closing_quote_for_symbol_date(yahoo_symbol, txn_date)
-
+    close_price, close_ccy = eodhd_close_for_symbol_date(best.get("symbol", ""), txn_date) if txn_date else ("", "EUR")
     close_with_ccy = combine_close_and_currency(close_price, close_ccy)
 
     return {
-        "name": name,
-        "url": security_url,
-        "source": (lookup or {}).get("source", "") or ("yahoo" if yahoo_symbol else ""),
-        "category": (lookup or {}).get("category", ""),
-        "txn_close_price": normalize_txn_close_price(close_with_ccy),
-        "txn_close_currency": normalize_currency_code(close_ccy),
+        "name": best.get("name") or normalize_isin(isin),
+        "symbol": best.get("symbol") or normalize_isin(isin),
+        "url": "",
+        "source": "eodhd",
+        "category": "",
+        "txn_close_price": normalize_txn_close_price(close_with_ccy) or "unavailable",
+        "txn_close_currency": normalize_currency_code(close_ccy) or "EUR",
     }
 
 
@@ -609,15 +696,16 @@ def resolve_symbol_metadata(symbol, txn_date=None):
     normalized = normalize_symbol(symbol)
     if not normalized:
         return {"name": "", "url": "", "source": "", "category": "", "txn_close_price": ""}
-    close_price, close_ccy = yahoo_closing_quote_for_symbol_date(normalized, txn_date) if txn_date else ("", "")
+    close_price, close_ccy = eodhd_close_for_symbol_date(normalized, txn_date) if txn_date else ("", "EUR")
     close_with_ccy = combine_close_and_currency(close_price, close_ccy)
     return {
-        "name": yahoo_symbol_name(normalized) or normalized,
+        "name": normalized,
+        "symbol": normalized,
         "url": "",
-        "source": "yahoo",
+        "source": "eodhd",
         "category": "",
         "txn_close_price": normalize_txn_close_price(close_with_ccy),
-        "txn_close_currency": normalize_currency_code(close_ccy),
+        "txn_close_currency": normalize_currency_code(close_ccy) or "EUR",
     }
 
 
